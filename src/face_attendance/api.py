@@ -21,7 +21,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .application import process_attendance_record
+from .application import (
+    process_attendance_record,
+    record_biometric_attendance,
+    record_manual_attendance,
+)
 from .config import API_KEY, FACE_TOLERANCE
 from .database import (
     attendance_report,
@@ -32,6 +36,7 @@ from .database import (
 from .domain import (
     AttendanceError,
     DuplicateAttendanceError,
+    RecognitionDecision,
     SessionClosedError,
     StudentNotInRosterError,
 )
@@ -68,13 +73,38 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 class YeuCauDiemDanh(BaseModel):
-    """Schema Pydantic đại diện cho yêu cầu ghi nhận điểm danh từ client."""
+    """Schema Pydantic đại diện cho yêu cầu ghi nhận điểm danh thông thường (legacy client)."""
 
     session_id: int = Field(gt=0, description="ID của buổi học đang mở điểm danh")
     student_id: int = Field(gt=0, description="ID sinh viên được nhận diện")
     recognition_distance: float = Field(
         ge=0.0, le=2.0, description="Khoảng cách khuôn mặt Euclidean L2"
     )
+
+
+class YeuCauDiemDanhBiometric(BaseModel):
+    """Schema cho quyết định nhận diện sinh trắc học có đầy đủ bằng chứng kiểm định."""
+
+    session_id: int = Field(gt=0, description="ID của buổi học đang mở điểm danh")
+    student_id: int = Field(gt=0, description="ID sinh viên được nhận diện")
+    student_code: str = Field(description="Mã sinh viên")
+    full_name: str = Field(default="", description="Họ tên sinh viên")
+    distance: float = Field(ge=0.0, le=2.0, description="Khoảng cách khuôn mặt Euclidean L2")
+    second_distance: float = Field(default=2.0, description="Khoảng cách ứng viên Top-2")
+    margin: float = Field(ge=0.0, description="Chênh lệch giữa Top-1 và Top-2 (Margin)")
+    liveness_passed: bool = Field(description="Bằng chứng kiểm tra liveness thành công")
+    confirmation_frames: int = Field(default=3, ge=1, description="Số khung hình nhận diện liên tiếp hợp lệ")
+    policy_version: str = Field(default="face-policy-v1", description="Phiên bản chính sách")
+
+
+class YeuCauDiemDanhManual(BaseModel):
+    """Schema cho giảng viên sửa hoặc ghi nhận điểm danh thủ công (Manual Correction)."""
+
+    session_id: int = Field(gt=0, description="ID của buổi học")
+    student_id: int = Field(gt=0, description="ID sinh viên")
+    status: str = Field(description="Trạng thái điểm danh ('present', 'late', 'absent')")
+    lecturer_id: str = Field(min_length=1, description="Mã hoặc tên giảng viên thực hiện")
+    reason: str = Field(min_length=3, description="Lý do điều chỉnh hoặc điểm danh thay thế")
 
 
 def xac_thuc_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -122,7 +152,7 @@ def bao_cao_buoi_hoc(session_id: int) -> list[dict[str, object]]:
     return report.astype(object).where(report.notna(), None).to_dict(orient="records")
 
 
-@app.post("/attendance", summary="Ghi nhận kết quả điểm danh cho sinh viên")
+@app.post("/attendance", summary="Ghi nhận kết quả điểm danh cho sinh viên (Legacy compatibility)")
 def attendance(
     request: YeuCauDiemDanh,
     _: None = Depends(xac_thuc_api_key),
@@ -144,3 +174,61 @@ def attendance(
         raise HTTPException(status_code=422, detail=str(exc))
     except AttendanceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post(
+    "/attendance/biometric",
+    summary="Ghi nhận điểm danh sinh trắc học có kèm bằng chứng quyết định (Recognition Decision)",
+    dependencies=[Depends(xac_thuc_api_key)],
+)
+def attendance_biometric(request: YeuCauDiemDanhBiometric) -> dict[str, Any]:
+    """Nhận RecognitionDecision đầy đủ từ vision pipeline và thực hiện ghi nhận."""
+    decision = RecognitionDecision(
+        student_id=request.student_id,
+        student_code=request.student_code,
+        full_name=request.full_name,
+        distance=request.distance,
+        second_distance=request.second_distance,
+        margin=request.margin,
+        liveness_passed=request.liveness_passed,
+        confirmation_frames=request.confirmation_frames,
+        policy_version=request.policy_version,
+    )
+    try:
+        res = record_biometric_attendance(
+            session_id=request.session_id,
+            decision=decision,
+            tolerance=FACE_TOLERANCE,
+        )
+        return res.to_dict()
+    except DuplicateAttendanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except SessionClosedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except StudentNotInRosterError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except AttendanceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post(
+    "/attendance/manual",
+    summary="Giảng viên điều chỉnh hoặc điểm danh thủ công (Manual Correction)",
+    dependencies=[Depends(xac_thuc_api_key)],
+)
+def attendance_manual(request: YeuCauDiemDanhManual) -> dict[str, Any]:
+    """Cho phép giảng viên can thiệp hoặc sửa đổi điểm danh kèm lý do và lưu audit log."""
+    try:
+        res = record_manual_attendance(
+            session_id=request.session_id,
+            student_id=request.student_id,
+            status=request.status,
+            lecturer_id=request.lecturer_id,
+            reason=request.reason,
+        )
+        return res.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi điều chỉnh điểm danh: {exc}")
+

@@ -16,12 +16,14 @@ from typing import Any
 import streamlit as st
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
+from .application import record_manual_attendance
 from .config import FACE_TOLERANCE
 from .database import (
     attendance_report,
     change_session_status,
     create_attendance_session,
     create_course,
+    get_connection,
     get_course_roster,
     get_setting,
     list_courses,
@@ -365,6 +367,55 @@ def render_reports() -> None:
         file_name=f"attendance_{safe_code}_session_{selected['id']}.csv",
         mime="text/csv",
     )
+
+    st.divider()
+    st.subheader("Điều chỉnh điểm danh thủ công (Human-in-the-Loop)")
+    with st.expander("Mở biểu mẫu can thiệp / sửa đổi điểm danh"):
+        with get_connection() as conn:
+            roster_rows = conn.execute(
+                """
+                SELECT st.id, st.student_code, st.full_name
+                FROM session_enrollments se
+                JOIN students st ON st.id = se.student_id
+                WHERE se.session_id = ?
+                ORDER BY st.student_code
+                """,
+                (int(selected["id"]),),
+            ).fetchall()
+
+        if roster_rows:
+            student_map = {f"{r['student_code']} - {r['full_name']}": int(r["id"]) for r in roster_rows}
+            with st.form("manual_correction_form"):
+                sel_student = st.selectbox("Chọn sinh viên cần điều chỉnh", list(student_map))
+                sel_status = st.selectbox(
+                    "Trạng thái mới",
+                    ["present", "late", "absent"],
+                    format_func=lambda s: {"present": "Có mặt", "late": "Đi trễ", "absent": "Vắng"}[s],
+                )
+                lecturer_name = st.text_input("Giảng viên phê duyệt", value="Giảng viên phụ trách")
+                reason = st.text_input(
+                    "Lý do can thiệp",
+                    placeholder="Ví dụ: Camera mờ, đã xác nhận trực tiếp bằng thẻ sinh viên",
+                )
+                submit_corr = st.form_submit_button("Xác nhận điều chỉnh & Ghi vết kiểm toán")
+
+            if submit_corr:
+                if not reason.strip():
+                    st.error("Bắt buộc phải nhập lý do can thiệp điểm danh.")
+                else:
+                    try:
+                        record_manual_attendance(
+                            session_id=int(selected["id"]),
+                            student_id=student_map[sel_student],
+                            status=sel_status,
+                            lecturer_id=lecturer_name.strip(),
+                            reason=reason.strip(),
+                        )
+                        st.success(f"Đã cập nhật điểm danh cho {sel_student} và lưu vết kiểm toán.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Lỗi khi cập nhật: {exc}")
+
 
 def render_security_settings() -> None:
     st.subheader("Bảo mật")

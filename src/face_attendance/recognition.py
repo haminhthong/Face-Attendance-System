@@ -40,7 +40,8 @@ from .config import (
     MIN_IDENTITY_MARGIN,
     PROCESS_EVERY_N_FRAMES,
 )
-from .database import get_connection, mark_attendance, save_embedding, upsert_student
+from .database import get_connection, save_embedding, upsert_student
+from .domain import RecognitionDecision
 from .liveness import BoKiemTraChopMat, ti_le_mat
 from .matcher import tim_danh_tinh_tot_nhat
 from .utils import utc_iso
@@ -59,6 +60,7 @@ class EnrollmentResult:
         brightness (float): Độ sáng trung bình (0-255).
         face_width (int): Chiều rộng vùng mặt (px).
         face_height (int): Chiều cao vùng mặt (px).
+        phash (str | None): Perceptual hash phục vụ phát hiện ảnh gần trùng.
     """
 
     embedding: np.ndarray
@@ -67,6 +69,7 @@ class EnrollmentResult:
     brightness: float
     face_width: int
     face_height: int
+    phash: str | None = None
 
 
 def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
@@ -80,6 +83,7 @@ def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
     5. Phát hiện duy nhất 1 khuôn mặt trong ảnh.
     6. Kích thước vùng mặt tối thiểu (>= 100x100px).
     7. Trích xuất vector đặc trưng 128D bằng dlib resnet model.
+    8. Tính Perceptual Hash (pHash) để kiểm soát ảnh gần trùng.
 
     Args:
         image_bytes (bytes): Dữ liệu nhị phân của file ảnh.
@@ -145,6 +149,18 @@ def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
     if len(encodings) != 1:
         raise ValueError("Không thể tạo vector khuôn mặt từ ảnh này.")
 
+    # 6. Tính toán pHash kiểm soát gần trùng
+    phash_str: str | None = None
+    try:
+        import io
+        from PIL import Image
+        import imagehash
+
+        pil_img = Image.open(io.BytesIO(image_bytes))
+        phash_str = str(imagehash.phash(pil_img))
+    except Exception:
+        phash_str = None
+
     return EnrollmentResult(
         embedding=np.asarray(encodings[0], dtype=np.float64),
         image_hash=hashlib.sha256(image_bytes).hexdigest(),
@@ -152,6 +168,7 @@ def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
         brightness=brightness,
         face_width=face_width,
         face_height=face_height,
+        phash=phash_str,
     )
 
 
@@ -190,10 +207,43 @@ def enroll_student_images(
     if not validated:
         raise ValueError("Không có ảnh hợp lệ. " + " | ".join(errors))
 
+    # Kiểm tra near-duplicate giữa các ảnh trong cùng đợt tải lên
+    near_dup_count = 0
+    valid_unique: list[tuple[str, EnrollmentResult]] = []
+    for i, (name_i, res_i) in enumerate(validated):
+        is_near_dup = False
+        for name_prev, res_prev in valid_unique:
+            if res_i.image_hash == res_prev.image_hash:
+                is_near_dup = True
+                errors.append(f"{name_i}: Bỏ qua vì trùng byte với {name_prev}.")
+                break
+            if res_i.phash and res_prev.phash:
+                try:
+                    import imagehash
+
+                    h_curr = imagehash.hex_to_hash(res_i.phash)
+                    h_prev = imagehash.hex_to_hash(res_prev.phash)
+                    if (h_curr - h_prev) <= 2:
+                        is_near_dup = True
+                        errors.append(
+                            f"{name_i}: Quá giống {name_prev} (near-duplicate). "
+                            "Hãy cung cấp góc mặt hoặc ánh sáng khác nhau để tăng độ bao phủ."
+                        )
+                        break
+                except Exception:
+                    pass
+        if not is_near_dup:
+            valid_unique.append((name_i, res_i))
+        else:
+            near_dup_count += 1
+
+    if not valid_unique:
+        raise ValueError("Tất cả ảnh tải lên đều bị trùng lặp hoặc near-duplicate. " + " | ".join(errors))
+
     student = upsert_student(student_code, full_name, class_name)
     saved = 0
     duplicates = 0
-    for _, result in validated:
+    for _, result in valid_unique:
         if save_embedding(
             int(student["id"]),
             result.embedding,
@@ -209,7 +259,7 @@ def enroll_student_images(
 
     messages = errors
     if duplicates:
-        messages.append(f"Bỏ qua {duplicates} ảnh trùng đã đăng ký trước đó.")
+        messages.append(f"Bỏ qua {duplicates} ảnh trùng đã đăng ký trước đó trong DB.")
     return saved, messages
 
 
@@ -272,19 +322,32 @@ class RecognitionEngine:
     """Bộ máy xử lý và điều phối nhận diện khuôn mặt realtime qua luồng camera WebRTC.
 
     Tích hợp:
+    - Single-face Policy Gate: Nghiêm ngặt từ chối nhận diện khi có > 1 khuôn mặt trong khung hình.
     - Skip-frame processing (thu nhỏ ảnh 0.25x) để duy trì tốc độ FPS cao.
     - So khớp Open-Set với từ chối người lạ (Matcher).
     - Máy trạng thái liveness chớp mắt (BoKiemTraChopMat).
-    - Đếm xác nhận liên tiếp nhiều khung hình (Confirmation frames).
+    - Đếm xác nhận liên tiếp nhiều khung hình cùng danh tính ổn định (Confirmation frames).
+    - Clean Architecture: Chỉ sinh RecognitionDecision DTO, chuyển giao lưu trữ cho AttendanceService.
     - Khóa Threading Lock cho đồng bộ sự kiện sang UI Streamlit.
     """
 
-    def __init__(self, session_id: int, require_blink: bool) -> None:
-        self.session_id = session_id
+    def __init__(
+        self,
+        session_id: int,
+        require_blink: bool,
+        attendance_service: Any = None,
+    ) -> None:
+        if attendance_service is None:
+            from .application.attendance_service import record_biometric_attendance
+
+            self.attendance_service = record_biometric_attendance
+        else:
+            self.attendance_service = attendance_service
         self.require_blink = require_blink
         self.templates = load_templates(session_id)
         self.frame_number = 0
         self.confirm_counts: dict[int, int] = {}
+        self.current_tracking_student_id: int | None = None
         self.blink_checker = BoKiemTraChopMat(
             BLINK_EAR_CLOSED, BLINK_EAR_OPEN, BLINK_VERIFICATION_SECONDS
         )
@@ -309,14 +372,18 @@ class RecognitionEngine:
 
     def best_identity(
         self, encoding: np.ndarray
-    ) -> tuple[FaceTemplate | None, float, float]:
-        """Tìm danh tính khớp nhất sử dụng module matcher."""
+    ) -> tuple[FaceTemplate | None, float, float, float]:
+        """Tìm danh tính khớp nhất sử dụng module matcher.
+
+        Returns:
+            (template_tot_nhat, khoang_cach_top1, khoang_cach_top2, margin)
+        """
         if not self.templates:
-            return None, float("inf"), float("inf")
+            return None, float("inf"), float("inf"), float("inf")
         result = tim_danh_tinh_tot_nhat(
             encoding, self.templates, FACE_TOLERANCE, MIN_IDENTITY_MARGIN
         )
-        return result.mau, result.khoang_cach, result.do_phan_biet
+        return result.mau, result.khoang_cach, result.khoang_cach_thu_hai, result.do_phan_biet
 
     def update_blink(self, student_id: int, landmarks: dict[str, Any] | None) -> bool:
         """Cập nhật tỉ lệ mắt và máy trạng thái chớp mắt."""
@@ -350,11 +417,7 @@ class RecognitionEngine:
     def process(self, image_bgr: np.ndarray) -> np.ndarray:
         """Xử lý chính cho mỗi khung hình (Frame processing pipeline).
 
-        Args:
-            image_bgr (np.ndarray): Khung hình BGR từ camera WebRTC.
-
-        Returns:
-            np.ndarray: Khung hình sau khi vẽ bounding box và nhãn nhận diện.
+        Áp dụng Single-Face Gate: Chỉ xử lý điểm danh khi phát hiện đúng 1 khuôn mặt.
         """
         self.frame_number += 1
         # Chỉ xử lý các frame cách nhau PROCESS_EVERY_N_FRAMES để tăng tốc độ xử lý
@@ -367,102 +430,125 @@ class RecognitionEngine:
         small = cv2.resize(image_bgr, (0, 0), fx=0.25, fy=0.25)
         rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         locations = face_recognition.face_locations(rgb_small, model="hog")
-        encodings = face_recognition.face_encodings(rgb_small, locations, model="small")
-        landmarks_list = (
-            face_recognition.face_landmarks(rgb_small, locations, model="small")
-            if self.require_blink and locations
-            else [{} for _ in locations]
-        )
 
-        observations: list[dict[str, Any]] = []
-        seen_students: set[int] = set()
-        for index, (encoding, location) in enumerate(zip(encodings, locations)):
-            template, distance, margin = self.best_identity(encoding)
-            landmarks = landmarks_list[index] if index < len(landmarks_list) else {}
-            if template:
-                seen_students.add(template.student_id)
-                live = self.update_blink(template.student_id, landmarks)
-            else:
-                live = False
-            observations.append(
-                {
-                    "location": location,
-                    "template": template,
-                    "distance": distance,
-                    "margin": margin,
-                    "live": live,
-                }
+        num_faces = len(locations)
+
+        # 1. Không tìm thấy khuôn mặt
+        if num_faces == 0:
+            self.current_tracking_student_id = None
+            self.confirm_counts.clear()
+            self.last_annotations = []
+            self.set_event("info", "Đang chờ khuôn mặt...")
+            return self.draw_annotations(image_bgr)
+
+        # 2. Phát hiện nhiều hơn 1 khuôn mặt: Kích hoạt Single-Face Gate từ chối
+        if num_faces > 1:
+            self.current_tracking_student_id = None
+            self.confirm_counts.clear()
+            warning_annotations = []
+            for top, right, bottom, left in locations:
+                warning_annotations.append(
+                    (
+                        top * 4,
+                        right * 4,
+                        bottom * 4,
+                        left * 4,
+                        (0, 140, 255),  # Màu cam: Cảnh báo
+                        f"NHIỀU KHUÔN MẶT ({num_faces})",
+                    )
+                )
+            self.last_annotations = warning_annotations
+            self.set_event(
+                "warning",
+                f"Phát hiện {num_faces} khuôn mặt. Chính sách yêu cầu duy nhất 1 người trước camera.",
             )
+            return self.draw_annotations(image_bgr)
 
-        # Reset đếm khung hình nếu sinh viên rời khỏi camera
-        for student_id in list(self.confirm_counts):
-            if student_id not in seen_students:
-                self.confirm_counts[student_id] = 0
-                self.blink_checker.dat_lai(student_id)
-        live_students = {
-            observation["template"].student_id
-            for observation in observations
-            if observation["template"] is not None and observation["live"]
-        }
-        for student_id in seen_students:
-            if student_id in live_students:
-                self.confirm_counts[student_id] = (
-                    self.confirm_counts.get(student_id, 0) + 1
+        # 3. Duy nhất 1 khuôn mặt hợp lệ: Tiếp tục pipeline
+        location = locations[0]
+        encodings = face_recognition.face_encodings(rgb_small, [location], model="small")
+        landmarks_list = (
+            face_recognition.face_landmarks(rgb_small, [location], model="small")
+            if self.require_blink
+            else [{}]
+        )
+        if not encodings:
+            self.set_event("warning", "Không thể trích xuất đặc trưng khuôn mặt.")
+            return self.draw_annotations(image_bgr)
+
+        encoding = encodings[0]
+        landmarks = landmarks_list[0] if landmarks_list else {}
+        template, distance, second_distance, margin = self.best_identity(encoding)
+
+        if template:
+            # Theo dõi tính ổn định danh tính (tránh nhảy liên tục giữa SV001 và SV002)
+            if self.current_tracking_student_id != template.student_id:
+                self.current_tracking_student_id = template.student_id
+                self.confirm_counts[template.student_id] = 0
+                self.blink_checker.dat_lai(template.student_id)
+
+            live = self.update_blink(template.student_id, landmarks)
+            if live:
+                self.confirm_counts[template.student_id] = (
+                    self.confirm_counts.get(template.student_id, 0) + 1
                 )
             else:
-                self.confirm_counts[student_id] = 0
+                self.confirm_counts[template.student_id] = 0
+        else:
+            self.current_tracking_student_id = None
+            self.confirm_counts.clear()
+            live = False
 
-        # Chuẩn bị danh sách nhãn vẽ đồ họa
-        new_annotations: list[
-            tuple[int, int, int, int, tuple[int, int, int], str]
-        ] = []
-        for observation in observations:
-            top, right, bottom, left = observation["location"]
-            # Nhân 4 lần tọa độ do đã thu nhỏ 0.25x
-            top, right, bottom, left = top * 4, right * 4, bottom * 4, left * 4
-            template: FaceTemplate | None = observation["template"]
-            distance = float(observation["distance"])
+        top, right, bottom, left = location
+        top, right, bottom, left = top * 4, right * 4, bottom * 4, left * 4
 
-            if template is None:
-                color = (0, 0, 255)  # Đỏ: Người lạ
-                label = "KHÔNG XÁC ĐỊNH"
+        new_annotations: list[tuple[int, int, int, int, tuple[int, int, int], str]] = []
+        if template is None:
+            color = (0, 0, 255)  # Đỏ: Người lạ
+            label = "KHÔNG XÁC ĐỊNH"
+            self.set_event("warning", "Khuôn mặt chưa được đăng ký trong danh sách buổi học.")
+        else:
+            count = self.confirm_counts.get(template.student_id, 0)
+            if not live:
+                color = (0, 215, 255)  # Vàng: Cần chớp mắt
+                label = f"{template.student_code} - CHỚP MẮT"
+                self.set_event("warning", f"{template.student_code}: Hãy chớp mắt một lần.")
+            elif count < CONFIRMATION_FRAMES:
+                color = (0, 215, 255)  # Vàng: Đang xác nhận giữ yên
+                label = f"{template.student_code} - GIỮ YÊN {count}/{CONFIRMATION_FRAMES}"
             else:
-                count = self.confirm_counts.get(template.student_id, 0)
-                if not observation["live"]:
-                    color = (0, 215, 255)  # Vàng: Cần chớp mắt
-                    label = f"{template.student_code} - CHỚP MẮT"
-                    self.set_event("warning", f"{template.student_code}: hãy chớp mắt một lần.")
-                elif count < CONFIRMATION_FRAMES:
-                    color = (0, 215, 255)  # Vàng: Đang xác nhận giữ yên
-                    label = (
-                        f"{template.student_code} - GIỮ YÊN "
-                        f"{count}/{CONFIRMATION_FRAMES}"
+                color = (0, 255, 0)  # Xanh lá: Khớp thành công
+                label = f"{template.student_code} - KHỚP {distance:.3f} (Δ={margin:.3f})"
+                now_mono = time.monotonic()
+                last = self.last_attempt.get(template.student_id, 0.0)
+                # Ghi điểm danh qua Clean Architecture Decision Service
+                if now_mono - last >= ATTEMPT_COOLDOWN_SECONDS:
+                    decision = RecognitionDecision(
+                        student_id=template.student_id,
+                        student_code=template.student_code,
+                        full_name=template.full_name,
+                        distance=distance,
+                        second_distance=second_distance,
+                        margin=margin,
+                        liveness_passed=True,
+                        confirmation_frames=count,
+                        policy_version="face-policy-v1",
+                        timestamp_utc=utc_iso(),
                     )
-                else:
-                    color = (0, 255, 0)  # Xanh lá: Khớp thành công
-                    label = f"{template.student_code} - KHỚP {distance:.3f}"
-                    now_mono = time.monotonic()
-                    last = self.last_attempt.get(template.student_id, 0.0)
-                    # Ghi điểm danh có cooldown tránh ghi liên tục
-                    if now_mono - last >= ATTEMPT_COOLDOWN_SECONDS:
-                        result, message = mark_attendance(
-                            self.session_id, template.student_id, distance
-                        )
-                        self.last_attempt[template.student_id] = now_mono
-                        event_type = {
-                            "created": "success",
-                            "already": "info",
-                            "closed": "error",
-                            "inactive": "error",
-                            "outside": "error",
-                            "rejected": "error",
-                            "error": "error",
-                        }.get(result, "info")
-                        self.set_event(event_type, message)
+                    self.last_attempt[template.student_id] = now_mono
+                    try:
+                        res = self.attendance_service(self.session_id, decision)
+                        status_label = "CÓ MẶT" if res.status == "present" else "ĐI TRỄ"
+                        self.set_event("success", f"{template.student_code} - {status_label}")
+                    except Exception as exc:
+                        msg = str(exc)
+                        evt_type = "info" if "đã điểm danh" in msg.lower() else "error"
+                        self.set_event(evt_type, msg)
 
-            new_annotations.append((top, right, bottom, left, color, label))
+        new_annotations.append((top, right, bottom, left, color, label))
         self.last_annotations = new_annotations
         return self.draw_annotations(image_bgr)
+
 
 
 class AttendanceVideoProcessor(VideoProcessorBase):

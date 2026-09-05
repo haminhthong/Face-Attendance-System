@@ -33,6 +33,7 @@ class RejectionReason(str, Enum):
     ALREADY_ATTENDED = "already_attended"
     NOT_IN_ROSTER = "not_in_roster"
     NO_CONSENT = "no_consent"
+    UNSTABLE_TRACKING = "unstable_tracking"
 
 
 class ConfidenceLevel(str, Enum):
@@ -41,6 +42,23 @@ class ConfidenceLevel(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+
+
+class MatchQuality(str, Enum):
+    """Phân loại dải khoảng cách so khớp (Distance band/Match quality)."""
+
+    STRONG_MATCH = "strong_match"
+    BORDERLINE_MATCH = "borderline_match"
+    WEAK_MATCH = "weak_match"
+
+
+def get_match_quality(distance: float | None, tolerance: float = 0.50) -> MatchQuality:
+    """Xác định dải chất lượng so khớp (tránh gây hiểu lầm là xác suất calibrated)."""
+    if distance is None or distance > tolerance:
+        return MatchQuality.WEAK_MATCH
+    if distance <= tolerance * 0.75:
+        return MatchQuality.STRONG_MATCH
+    return MatchQuality.BORDERLINE_MATCH
 
 
 def get_confidence_level(distance: float | None, tolerance: float = 0.50) -> ConfidenceLevel:
@@ -58,3 +76,4 @@ def get_confidence_level(distance: float | None, tolerance: float = 0.50) -> Con
     if distance <= tolerance * 0.75:  # Ví dụ <= 0.375 với tolerance 0.50
         return ConfidenceLevel.HIGH
     return ConfidenceLevel.MEDIUM
+

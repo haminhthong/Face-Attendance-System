@@ -9,9 +9,34 @@ from .enums import (
     AttendanceDecision,
     AttendanceStatus,
     ConfidenceLevel,
+    MatchQuality,
     RejectionReason,
     get_confidence_level,
+    get_match_quality,
 )
+
+
+@dataclass(frozen=True)
+class RecognitionDecision:
+    """Đối tượng truyền tải quyết định nhận diện từ Vision Pipeline sang Application Service.
+
+    Mang đầy đủ bằng chứng kiểm định (distance, margin, liveness, confirmation frames).
+    """
+
+    student_id: int
+    student_code: str
+    full_name: str
+    distance: float
+    second_distance: float
+    margin: float
+    liveness_passed: bool
+    confirmation_frames: int
+    policy_version: str = "face-policy-v1"
+    timestamp_utc: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Chuyển đổi sang dict định dạng JSON thân thiện."""
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -27,6 +52,10 @@ class AttendanceResult:
         recognized_at: Thời điểm nhận diện theo chuẩn ISO 8601 UTC/VN.
         decision: Quyết định điểm danh ('accepted' hoặc 'rejected').
         rejection_reason: Lý do từ chối nếu decision == 'rejected'.
+        margin: Độ chênh lệch giữa Top-1 và Top-2 (nếu có).
+        match_quality: Phân loại dải khoảng cách ('strong_match', 'borderline_match', 'weak_match').
+        source: Nguồn gốc điểm danh ('face_webrtc', 'manual', etc.).
+        policy_version: Phiên bản chính sách nhận diện được áp dụng.
     """
 
     student_id: str | None
@@ -37,6 +66,16 @@ class AttendanceResult:
     recognized_at: str
     decision: AttendanceDecision | str
     rejection_reason: RejectionReason | str | None = None
+    margin: float | None = None
+    match_quality: MatchQuality | str | None = None
+    source: str = "face_webrtc"
+    policy_version: str = "face-policy-v1"
+
+    @property
+    def is_accepted(self) -> bool:
+        """Kiểm tra xem kết quả có phải được chấp nhận (ACCEPTED) hay không."""
+        val = self.decision.value if hasattr(self.decision, "value") else str(self.decision)
+        return val.lower() == "accepted"
 
     def to_dict(self) -> dict[str, Any]:
         """Chuyển đổi sang dict định dạng JSON thân thiện."""
@@ -49,12 +88,16 @@ class AttendanceResult:
             data["confidence_level"] = str(
                 self.confidence_level.value if hasattr(self.confidence_level, "value") else self.confidence_level
             )
+        if isinstance(self.match_quality, Enum_or_str):
+            data["match_quality"] = str(
+                self.match_quality.value if hasattr(self.match_quality, "value") else self.match_quality
+            )
         if self.rejection_reason is not None and hasattr(self.rejection_reason, "value"):
             data["rejection_reason"] = self.rejection_reason.value
         return data
 
 
-Enum_or_str = (AttendanceStatus, AttendanceDecision, ConfidenceLevel, RejectionReason)
+Enum_or_str = (AttendanceStatus, AttendanceDecision, ConfidenceLevel, MatchQuality, RejectionReason)
 
 
 def build_accepted_result(
@@ -64,6 +107,9 @@ def build_accepted_result(
     liveness_passed: bool,
     recognized_at: str,
     tolerance: float = 0.50,
+    margin: float | None = None,
+    source: str = "face_webrtc",
+    policy_version: str = "face-policy-v1",
 ) -> AttendanceResult:
     """Tạo kết quả chấp nhận điểm danh chuẩn hóa.
 
@@ -74,11 +120,15 @@ def build_accepted_result(
         liveness_passed: Trạng thái liveness.
         recognized_at: Chuỗi ISO 8601 thời gian nhận diện.
         tolerance: Ngưỡng tối đa để phân loại confidence level.
+        margin: Độ chênh lệch giữa Top-1 và Top-2.
+        source: Nguồn gốc điểm danh.
+        policy_version: Phiên bản nhận diện.
 
     Returns:
         AttendanceResult: Đối tượng kết quả điểm danh được chấp nhận.
     """
     conf = get_confidence_level(distance, tolerance)
+    quality = get_match_quality(distance, tolerance)
     return AttendanceResult(
         student_id=student_id,
         status=status if isinstance(status, AttendanceStatus) else AttendanceStatus(status),
@@ -88,6 +138,10 @@ def build_accepted_result(
         recognized_at=recognized_at,
         decision=AttendanceDecision.ACCEPTED,
         rejection_reason=None,
+        margin=round(margin, 4) if margin is not None else None,
+        match_quality=quality,
+        source=source,
+        policy_version=policy_version,
     )
 
 
@@ -98,6 +152,9 @@ def build_rejected_result(
     distance: float | None = None,
     liveness_passed: bool = False,
     tolerance: float = 0.50,
+    margin: float | None = None,
+    source: str = "face_webrtc",
+    policy_version: str = "face-policy-v1",
 ) -> AttendanceResult:
     """Tạo kết quả từ chối điểm danh chuẩn hóa với lý do rõ ràng.
 
@@ -108,12 +165,16 @@ def build_rejected_result(
         distance: Khoảng cách Euclidean L2 nếu có.
         liveness_passed: Kết quả liveness.
         tolerance: Ngưỡng khoảng cách.
+        margin: Chênh lệch margin nếu có.
+        source: Nguồn gốc.
+        policy_version: Phiên bản nhận diện.
 
     Returns:
         AttendanceResult: Đối tượng kết quả từ chối.
     """
     reason_enum = reason if isinstance(reason, RejectionReason) else RejectionReason(reason)
     conf = get_confidence_level(distance, tolerance) if distance is not None else ConfidenceLevel.LOW
+    quality = get_match_quality(distance, tolerance) if distance is not None else MatchQuality.WEAK_MATCH
     return AttendanceResult(
         student_id=student_id,
         status=AttendanceStatus.ABSENT,
@@ -123,4 +184,9 @@ def build_rejected_result(
         recognized_at=recognized_at,
         decision=AttendanceDecision.REJECTED,
         rejection_reason=reason_enum,
+        margin=round(margin, 4) if margin is not None else None,
+        match_quality=quality,
+        source=source,
+        policy_version=policy_version,
     )
+

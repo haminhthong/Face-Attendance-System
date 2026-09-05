@@ -128,10 +128,20 @@ def init_database() -> None:
         session_id INTEGER NOT NULL,
         student_id INTEGER NOT NULL,
         check_in_at_utc TEXT NOT NULL,
-        attendance_status TEXT NOT NULL CHECK (attendance_status IN ('present', 'late')),
+        attendance_status TEXT NOT NULL CHECK (attendance_status IN ('present', 'late', 'absent')),
         recognition_distance REAL NOT NULL,
         threshold_used REAL NOT NULL,
         source TEXT NOT NULL DEFAULT 'face_webrtc',
+        identity_margin REAL DEFAULT 0.0,
+        margin_threshold REAL DEFAULT 0.05,
+        liveness_policy TEXT DEFAULT 'ear_blink_v1',
+        recognition_policy_version TEXT DEFAULT 'face-policy-v1',
+        confirmation_frames INTEGER DEFAULT 3,
+        original_status TEXT,
+        final_status TEXT,
+        corrected_by TEXT,
+        correction_reason TEXT,
+        corrected_at_utc TEXT,
         UNIQUE (session_id, student_id),
         FOREIGN KEY (session_id) REFERENCES attendance_sessions(id) ON DELETE CASCADE,
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE RESTRICT
@@ -158,6 +168,27 @@ def init_database() -> None:
     with get_connection() as connection:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(schema)
+
+        # Migration an toàn: Tự động thêm các cột bằng chứng nếu dùng DB cũ
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(attendance)").fetchall()
+        }
+        evidence_columns = [
+            ("identity_margin", "REAL DEFAULT 0.0"),
+            ("margin_threshold", "REAL DEFAULT 0.05"),
+            ("liveness_policy", "TEXT DEFAULT 'ear_blink_v1'"),
+            ("recognition_policy_version", "TEXT DEFAULT 'face-policy-v1'"),
+            ("confirmation_frames", "INTEGER DEFAULT 3"),
+            ("original_status", "TEXT"),
+            ("final_status", "TEXT"),
+            ("corrected_by", "TEXT"),
+            ("correction_reason", "TEXT"),
+            ("corrected_at_utc", "TEXT"),
+        ]
+        for col_name, col_type in evidence_columns:
+            if col_name not in columns:
+                connection.execute(f"ALTER TABLE attendance ADD COLUMN {col_name} {col_type}")
+
         migration_key = "session_roster_migrated_v1"
         migrated = connection.execute(
             "SELECT 1 FROM app_settings WHERE setting_key = ?", (migration_key,)
@@ -174,6 +205,7 @@ def init_database() -> None:
                 JOIN course_enrollments ce ON ce.course_id = ses.course_id
                 """
             )
+
             connection.execute(
                 """
                 INSERT INTO app_settings(setting_key, setting_value, updated_at_utc)
@@ -615,22 +647,40 @@ def attendance_report(session_id: int) -> pd.DataFrame:
 
 
 def mark_attendance(
-    session_id: int, student_id: int, distance: float
+    session_id: int,
+    student_id: int,
+    distance: float,
+    identity_margin: float = 0.0,
+    margin_threshold: float = 0.05,
+    liveness_policy: str = "ear_blink_v1",
+    policy_version: str = "face-policy-v1",
+    confirmation_frames: int = 3,
+    source: str = "face_webrtc",
+    tolerance: float | None = None,
 ) -> tuple[str, str]:
     """Ghi nhận điểm danh cho sinh viên trong buổi học bằng ACID Transaction cách ly cao.
 
     Dùng BEGIN IMMEDIATE để chống ghi trùng khi nhiều client chạy song song.
     Phân loại tự động trạng thái 'Có mặt' (present) hoặc 'Đi trễ' (late) dựa trên cấu hình buổi học.
+    Lưu trữ đầy đủ các bằng chứng nhận diện (distance, margin, liveness, policy version) phục vụ audit.
 
     Args:
         session_id (int): ID buổi học.
         student_id (int): ID sinh viên.
         distance (float): Khoảng cách khuôn mặt so với mẫu tham chiếu.
+        identity_margin: Chênh lệch margin giữa Top-1 và Top-2.
+        margin_threshold: Ngưỡng margin yêu cầu.
+        liveness_policy: Tên thuật toán liveness được áp dụng.
+        policy_version: Phiên bản chính sách nhận diện.
+        confirmation_frames: Số khung hình nhận diện liên tiếp hợp lệ.
+        source: Nguồn gốc điểm danh ('face_webrtc', 'manual', etc.).
+        tolerance: Ngưỡng khoảng cách tùy biến (None lấy mặc định config).
 
     Returns:
         tuple[str, str]: (mã_kết_quả, thông_báo_chi_tiết).
     """
-    if not np.isfinite(distance) or not 0 <= distance <= config.FACE_TOLERANCE:
+    actual_tolerance = tolerance if tolerance is not None else config.FACE_TOLERANCE
+    if not np.isfinite(distance) or not 0 <= distance <= actual_tolerance:
         return "rejected", "Kết quả nhận diện không đạt ngưỡng cho phép."
 
     now = utc_now()
@@ -691,8 +741,10 @@ def mark_attendance(
             """
             INSERT INTO attendance(
                 session_id, student_id, check_in_at_utc, attendance_status,
-                recognition_distance, threshold_used, source
-            ) VALUES (?, ?, ?, ?, ?, ?, 'face_webrtc')
+                recognition_distance, threshold_used, source,
+                identity_margin, margin_threshold, liveness_policy,
+                recognition_policy_version, confirmation_frames
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -700,13 +752,19 @@ def mark_attendance(
                 utc_iso(now),
                 attendance_status,
                 float(distance),
-                FACE_TOLERANCE,
+                float(actual_tolerance),
+                source,
+                float(identity_margin),
+                float(margin_threshold),
+                str(liveness_policy),
+                str(policy_version),
+                int(confirmation_frames),
             ),
         )
         audit(
             connection,
             "attendance_created",
-            f"session={session_id},student={student_id},status={attendance_status}",
+            f"session={session_id},student={student_id},status={attendance_status},dist={distance:.4f},margin={identity_margin:.4f}",
         )
         connection.commit()
         label = "ĐI TRỄ" if attendance_status == "late" else "CÓ MẶT"
@@ -720,3 +778,107 @@ def mark_attendance(
         return "error", "Không thể ghi nhận điểm danh do lỗi cơ sở dữ liệu."
     finally:
         connection.close()
+
+
+def manual_attendance_correction(
+    session_id: int,
+    student_id: int,
+    new_status: str,
+    lecturer_id: str,
+    reason: str,
+) -> tuple[bool, str]:
+    """Giảng viên can thiệp sửa hoặc ghi nhận điểm danh thủ công với lưu vết kiểm toán (First-Class Audit Trail).
+
+    Args:
+        session_id: ID buổi học.
+        student_id: ID sinh viên.
+        new_status: 'present', 'late', hoặc 'absent'.
+        lecturer_id: Định danh giảng viên thực hiện sửa.
+        reason: Lý do điều chỉnh thủ công.
+
+    Returns:
+        tuple[bool, str]: (Thành công hay không, Thông báo).
+    """
+    if new_status not in {"present", "late", "absent"}:
+        return False, "Trạng thái mới không hợp lệ ('present', 'late', 'absent')."
+    if not reason.strip():
+        return False, "Cần cung cấp lý do điều chỉnh điểm danh."
+
+    now = utc_now()
+    now_iso = utc_iso(now)
+    connection = get_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        student = connection.execute(
+            "SELECT student_code, full_name FROM students WHERE id = ?", (student_id,)
+        ).fetchone()
+        if student is None:
+            connection.rollback()
+            return False, "Không tìm thấy sinh viên."
+
+        existing = connection.execute(
+            "SELECT id, attendance_status FROM attendance WHERE session_id = ? AND student_id = ?",
+            (session_id, student_id),
+        ).fetchone()
+
+        if existing:
+            orig_status = existing["attendance_status"]
+            connection.execute(
+                """
+                UPDATE attendance SET
+                    original_status = COALESCE(original_status, ?),
+                    final_status = ?,
+                    attendance_status = ?,
+                    corrected_by = ?,
+                    correction_reason = ?,
+                    corrected_at_utc = ?,
+                    source = 'manual_correction'
+                WHERE id = ?
+                """,
+                (
+                    orig_status,
+                    new_status,
+                    new_status,
+                    lecturer_id,
+                    reason.strip(),
+                    now_iso,
+                    existing["id"],
+                ),
+            )
+        else:
+            # Chưa từng có bản ghi -> ghi nhận thủ công trực tiếp
+            connection.execute(
+                """
+                INSERT INTO attendance(
+                    session_id, student_id, check_in_at_utc, attendance_status,
+                    recognition_distance, threshold_used, source,
+                    original_status, final_status, corrected_by,
+                    correction_reason, corrected_at_utc
+                ) VALUES (?, ?, ?, ?, 0.0, 0.50, 'manual', 'none', ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    student_id,
+                    now_iso,
+                    new_status,
+                    new_status,
+                    lecturer_id,
+                    reason.strip(),
+                    now_iso,
+                ),
+            )
+
+        audit(
+            connection,
+            "attendance_manual_corrected",
+            f"session={session_id},student={student_id},status={new_status},by={lecturer_id},reason={reason.strip()}",
+        )
+        connection.commit()
+        return True, f"Đã cập nhật trạng thái {student['student_code']} thành '{new_status}'."
+    except sqlite3.Error:
+        connection.rollback()
+        LOGGER.exception("Lỗi khi sửa điểm danh thủ công")
+        return False, "Lỗi cơ sở dữ liệu khi sửa điểm danh."
+    finally:
+        connection.close()
+

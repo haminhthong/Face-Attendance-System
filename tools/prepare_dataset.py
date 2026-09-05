@@ -111,11 +111,68 @@ def check_data_leakage() -> Dict[str, List[str]]:
         for h, file_list in duplicates.items():
             LOGGER.warning("  Hash %s...: %s", h[:8], " <-> ".join(file_list))
     else:
-        LOGGER.info("✅ Không phát hiện ảnh trùng giữa các tập dữ liệu.")
+        LOGGER.info("✅ Không phát hiện ảnh trùng byte-for-byte (SHA-256) giữa các tập dữ liệu.")
 
     return duplicates
+
+
+def check_near_duplicates_phash(threshold: int = 3) -> Dict[str, List[str]]:
+    """Phát hiện ảnh gần trùng (near-duplicates) giữa các tập dữ liệu bằng Perceptual Hash (pHash).
+
+    Args:
+        threshold: Ngưỡng khoảng cách Hamming tối đa (mặc định <= 3 coi là gần trùng).
+
+    Returns:
+        Dict[str, List[str]]: Danh sách các cặp ảnh bị nghi ngờ rò rỉ hoặc quá giống nhau.
+    """
+    try:
+        from PIL import Image
+        import imagehash
+    except ImportError:
+        LOGGER.info("Thư viện imagehash chưa được cài đặt; bỏ qua kiểm tra pHash.")
+        return {}
+
+    phashes: list[tuple[str, Path, Any]] = []
+    valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+    for root_dir in [ENROLLMENT_DIR, VALIDATION_DIR, TEST_DIR]:
+        if not root_dir.exists():
+            continue
+        for file_path in root_dir.rglob("*"):
+            if file_path.is_file() and file_path.suffix.lower() in valid_extensions:
+                try:
+                    with Image.open(file_path) as img:
+                        ph = imagehash.phash(img)
+                        phashes.append((str(file_path.relative_to(DATA_DIR)), file_path, ph))
+                except Exception:
+                    pass
+
+    near_duplicates: Dict[str, List[str]] = {}
+    for i in range(len(phashes)):
+        for j in range(i + 1, len(phashes)):
+            rel_i, _, ph_i = phashes[i]
+            rel_j, _, ph_j = phashes[j]
+            diff = ph_i - ph_j
+            if diff <= threshold:
+                key = f"{rel_i} <-> {rel_j}"
+                near_duplicates[key] = [f"Hamming distance: {diff}"]
+
+    if near_duplicates:
+        LOGGER.warning(
+            "⚠️  PHÁT HIỆN %d CẶP ẢNH GẦN TRÙNG (pHash Hamming distance <= %d):",
+            len(near_duplicates),
+            threshold,
+        )
+        for pair, detail in near_duplicates.items():
+            LOGGER.warning("  %s (%s)", pair, detail[0])
+    else:
+        LOGGER.info("✅ Không phát hiện ảnh gần trùng (near-duplicates) bằng pHash.")
+
+    return near_duplicates
 
 
 if __name__ == "__main__":
     init_evaluation_dataset_structure()
     check_data_leakage()
+    check_near_duplicates_phash()
+
