@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from ..policy import DEFAULT_RECOGNITION_POLICY
 from .enums import (
     AttendanceDecision,
     AttendanceStatus,
@@ -31,8 +32,16 @@ class RecognitionDecision:
     margin: float
     liveness_passed: bool
     confirmation_frames: int
-    policy_version: str = "face-policy-v1"
+    policy_version: str = DEFAULT_RECOGNITION_POLICY.policy_version
     timestamp_utc: str = ""
+    distance_threshold: float = DEFAULT_RECOGNITION_POLICY.distance_threshold
+    margin_threshold: float = DEFAULT_RECOGNITION_POLICY.identity_margin
+    aggregation_strategy: str = DEFAULT_RECOGNITION_POLICY.aggregation_strategy
+    embedding_model: str = DEFAULT_RECOGNITION_POLICY.embedding_model
+    embedding_model_version: str = DEFAULT_RECOGNITION_POLICY.embedding_model_version
+    stable_duration_ms: int = DEFAULT_RECOGNITION_POLICY.stable_duration_ms
+    liveness_policy: str = DEFAULT_RECOGNITION_POLICY.liveness_policy
+    recognition_policy_hash: str = DEFAULT_RECOGNITION_POLICY.policy_hash
 
     def to_dict(self) -> dict[str, Any]:
         """Chuyển đổi sang dict định dạng JSON thân thiện."""
@@ -69,7 +78,13 @@ class AttendanceResult:
     margin: float | None = None
     match_quality: MatchQuality | str | None = None
     source: str = "face_webrtc"
-    policy_version: str = "face-policy-v1"
+    policy_version: str = DEFAULT_RECOGNITION_POLICY.policy_version
+    distance_threshold: float | None = None
+    margin_threshold: float | None = None
+    aggregation_strategy: str | None = None
+    embedding_model_version: str | None = None
+    stable_duration_ms: int | None = None
+    recognition_policy_hash: str | None = None
 
     @property
     def is_accepted(self) -> bool:
@@ -80,18 +95,10 @@ class AttendanceResult:
     def to_dict(self) -> dict[str, Any]:
         """Chuyển đổi sang dict định dạng JSON thân thiện."""
         data = asdict(self)
-        if isinstance(self.status, Enum_or_str):
-            data["status"] = str(self.status.value if hasattr(self.status, "value") else self.status)
-        if isinstance(self.decision, Enum_or_str):
-            data["decision"] = str(self.decision.value if hasattr(self.decision, "value") else self.decision)
-        if isinstance(self.confidence_level, Enum_or_str):
-            data["confidence_level"] = str(
-                self.confidence_level.value if hasattr(self.confidence_level, "value") else self.confidence_level
-            )
-        if isinstance(self.match_quality, Enum_or_str):
-            data["match_quality"] = str(
-                self.match_quality.value if hasattr(self.match_quality, "value") else self.match_quality
-            )
+        for field_name in ("status", "decision", "confidence_level", "match_quality"):
+            value = getattr(self, field_name)
+            if isinstance(value, Enum_or_str):
+                data[field_name] = value.value
         if self.rejection_reason is not None and hasattr(self.rejection_reason, "value"):
             data["rejection_reason"] = self.rejection_reason.value
         return data
@@ -109,7 +116,13 @@ def build_accepted_result(
     tolerance: float = 0.50,
     margin: float | None = None,
     source: str = "face_webrtc",
-    policy_version: str = "face-policy-v1",
+    policy_version: str = DEFAULT_RECOGNITION_POLICY.policy_version,
+    distance_threshold: float | None = None,
+    margin_threshold: float | None = None,
+    aggregation_strategy: str | None = None,
+    embedding_model_version: str | None = None,
+    stable_duration_ms: int | None = None,
+    recognition_policy_hash: str | None = None,
 ) -> AttendanceResult:
     """Tạo kết quả chấp nhận điểm danh chuẩn hóa.
 
@@ -142,6 +155,12 @@ def build_accepted_result(
         match_quality=quality,
         source=source,
         policy_version=policy_version,
+        distance_threshold=distance_threshold if distance_threshold is not None else tolerance,
+        margin_threshold=margin_threshold,
+        aggregation_strategy=aggregation_strategy,
+        embedding_model_version=embedding_model_version,
+        stable_duration_ms=stable_duration_ms,
+        recognition_policy_hash=recognition_policy_hash,
     )
 
 
@@ -154,7 +173,13 @@ def build_rejected_result(
     tolerance: float = 0.50,
     margin: float | None = None,
     source: str = "face_webrtc",
-    policy_version: str = "face-policy-v1",
+    policy_version: str = DEFAULT_RECOGNITION_POLICY.policy_version,
+    distance_threshold: float | None = None,
+    margin_threshold: float | None = None,
+    aggregation_strategy: str | None = None,
+    embedding_model_version: str | None = None,
+    stable_duration_ms: int | None = None,
+    recognition_policy_hash: str | None = None,
 ) -> AttendanceResult:
     """Tạo kết quả từ chối điểm danh chuẩn hóa với lý do rõ ràng.
 
@@ -188,5 +213,10 @@ def build_rejected_result(
         match_quality=quality,
         source=source,
         policy_version=policy_version,
+        distance_threshold=distance_threshold if distance_threshold is not None else tolerance,
+        margin_threshold=margin_threshold,
+        aggregation_strategy=aggregation_strategy,
+        embedding_model_version=embedding_model_version,
+        stable_duration_ms=stable_duration_ms,
+        recognition_policy_hash=recognition_policy_hash,
     )
-

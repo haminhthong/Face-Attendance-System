@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .policy import DEFAULT_RECOGNITION_POLICY, RecognitionPolicy
+
 # Thông tin cơ bản ứng dụng & Bảo mật API
 APP_TITLE = "Hệ thống Điểm danh Sinh viên bằng Khuôn mặt"
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
@@ -83,15 +85,23 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
-# Tham số thuật toán nhận diện khuôn mặt (Open-Set Recognition)
-FACE_TOLERANCE = _env_float("FACE_TOLERANCE", 0.50, 0.10, 1.00)  # Ngưỡng khoảng cách L2 tối đa
-# Chênh lệch tối thiểu giữa ứng viên tốt nhất và ứng viên đứng thứ hai.
-MIN_IDENTITY_MARGIN = _env_float("MIN_IDENTITY_MARGIN", 0.05, 0.00, 1.00)
+# Chính sách nhận diện là nguồn sự thật duy nhất.
+# Hai hằng số cũ được giữ lại để không làm hỏng client cũ; code mới không tự
+# đọc threshold từ environment ở từng module nữa.
+RECOGNITION_POLICY: RecognitionPolicy = DEFAULT_RECOGNITION_POLICY
+FACE_TOLERANCE = RECOGNITION_POLICY.distance_threshold
+MIN_IDENTITY_MARGIN = RECOGNITION_POLICY.identity_margin
+
+if APP_ENV == "production" and not RECOGNITION_POLICY.calibrated:
+    raise RuntimeError(
+        "Production yêu cầu recognition policy đã được hiệu chuẩn trên private validation dataset."
+    )
 
 # Cấu hình xử lý camera WebRTC & Xác nhận đa khung hình
 # Bỏ qua một số khung hình để cân bằng độ trễ và mức sử dụng CPU.
 PROCESS_EVERY_N_FRAMES = _env_int("PROCESS_EVERY_N_FRAMES", 3, 1, 60)
-CONFIRMATION_FRAMES = _env_int("CONFIRMATION_FRAMES", 3, 1, 60)  # Số frame liên tiếp giữ ổn định
+# Tương thích ngược với UI/test cũ; runtime dùng thêm stable_duration_ms.
+CONFIRMATION_FRAMES = RECOGNITION_POLICY.minimum_observations
 
 # Cấu hình kiểm tra chất lượng ảnh đầu vào (Quality Control)
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # Giới hạn kích thước file 8MB
@@ -103,7 +113,7 @@ MAX_BRIGHTNESS = 220.0  # Ngưỡng độ sáng trung bình tối đa
 # Cấu hình máy trạng thái kiểm tra liveness chớp mắt (Eye Aspect Ratio - EAR)
 BLINK_EAR_CLOSED = 0.19  # EAR khi nhắm mắt
 BLINK_EAR_OPEN = 0.23  # EAR khi mở mắt
-BLINK_VERIFICATION_SECONDS = 10.0  # Thời hạn hiệu lực trạng thái liveness (giây)
+BLINK_VERIFICATION_SECONDS = RECOGNITION_POLICY.liveness_ttl_seconds
 ATTEMPT_COOLDOWN_SECONDS = 8.0  # Cooldown giữa các lần thử ghi nhận điểm danh (giây)
 
 # Chính sách lưu trữ dữ liệu sinh trắc học & Mã hóa PIN

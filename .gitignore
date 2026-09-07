@@ -140,6 +140,7 @@ venv.bak/
 face_attendance_data/
 data/private/
 data/results/
+scratch/
 *.db
 *.db-shm
 *.db-wal

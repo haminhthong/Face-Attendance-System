@@ -1,8 +1,7 @@
-"""Script đánh giá và hiệu chuẩn (Evaluation & Calibration Tool) cho hệ thống nhận diện khuôn mặt.
+"""Sanity check cho toán matcher bằng vector tổng hợp.
 
-Hỗ trợ 2 chế độ:
-1. Real Biometric Evaluation: Đọc ảnh thật từ data/private/ (Enrollment, Validation, Test) nếu có.
-2. Synthetic Matcher Sanity Benchmark: Tạo dữ liệu vector 128D giả lập để kiểm tra tính đúng đắn của logic thuật toán matcher.
+Script này chỉ kiểm tra toán matcher và logic reject bằng dữ liệu tổng hợp.
+Nó không được phép tạo recognition policy cho runtime.
 
 Đặc điểm nâng cấp:
 - Tách bạch rõ rệt giữa:
@@ -12,8 +11,8 @@ Hỗ trợ 2 chế độ:
   * True Accept Rate (TAR): Nhận diện đúng chính xác sinh viên.
 - Benchmark 3 chiến lược gom cụm (Aggregation Strategies): Min distance, Centroid, Top-K mean.
 - Lưới hiệu chuẩn 2 chiều (Distance x Margin Grid Sweep) trên tập Validation.
-- Xuất Recognition Policy Artifact chuẩn JSON (data/results/recognition_policy.json).
-- Xuất báo cáo Markdown chi tiết kèm biểu đồ phân phối ASCII (data/results/evaluation_report.md).
+- Xuất ``sanity_report.json`` với ``deployable: false``.
+- Xuất báo cáo Markdown để debug thuật toán, không phải biometric accuracy.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import numpy as np
 
@@ -33,9 +32,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR / "src") not in sys.path:
     sys.path.insert(0, str(BASE_DIR / "src"))
 
-from face_attendance.matcher import (
+from face_attendance.matcher import (  # noqa: E402
     AggregationStrategy,
-    KetQuaSoKhop,
     MauKhuonMat,
     tim_danh_tinh_tot_nhat,
 )
@@ -253,9 +251,8 @@ def build_ascii_distribution_chart(
 
 
 def run_evaluation() -> str:
-    """Chạy đánh giá calibration, sweep threshold và lưu policy artifact."""
+    """Chạy sanity check synthetic và tuyệt đối không xuất policy triển khai."""
     enrollment, eval_samples = generate_synthetic_eval_data()
-    is_synthetic = True
 
     # Thu thập khoảng cách genuine và impostor để vẽ biểu đồ phân phối
     genuine_distances: list[float] = []
@@ -269,7 +266,7 @@ def run_evaluation() -> str:
                 impostor_distances.append(dist)
 
     report_lines: list[str] = [
-        "# 📊 Báo Cáo Hiệu Chuẩn & Benchmark Thuật Toán Nhận Diện (Evaluation Report)",
+        "# Synthetic Matcher Sanity Check",
         "",
         "> ⚠️ **GHI CHÚ MINH BẠCH (Transparency Notice)**: "
         "Báo cáo này được thực thi ở chế độ **Synthetic Matcher Sanity Benchmark** "
@@ -283,43 +280,25 @@ def run_evaluation() -> str:
         "",
         "---",
         "",
-        "## 1. Phân Phối Khoảng Cách L2 (Distance Distribution & Threshold Calibration)",
+        "## 1. Phân phối khoảng cách L2 (debug toán học)",
         "",
         build_ascii_distribution_chart(genuine_distances, impostor_distances, threshold=0.50),
         "",
         "---",
         "",
-        "## 2. Lưới Hiệu Chuẩn Ngưỡng Khoảng Cách & Margin (Threshold x Margin Grid Sweep)",
+        "## 2. Grid check khoảng cách và margin (không phải calibration sinh trắc học)",
         "",
-        "| Khoảng cách (T_d) | Margin (T_m) | TAR (Đúng người) | Known Reject (Bị từ chối) | Wrong-ID (Nhận nhầm SV) | Unknown FAR | Đạt chuẩn an toàn? |",
+        "| Khoảng cách (T_d) | Margin (T_m) | Known reject | Wrong-ID | Unknown reject |",
         "|:---:|:---:|:---:|:---:|:---:|:---:|:---:|",
     ]
-
-    best_policy: dict[str, Any] = {}
-    best_tar = -1.0
 
     for th in [0.40, 0.45, 0.50, 0.55]:
         for mg in [0.00, 0.03, 0.05, 0.08]:
             m = evaluate_dataset(enrollment, eval_samples, th, mg)
-            is_safe = m.unknown_far == 0.0 and m.known_misid_rate == 0.0
-            safe_badge = "✅ AN TOÀN" if is_safe else "⚠️ CẢNH BÁO"
             report_lines.append(
-                f"| {th:.2f} | {mg:.2f} | {m.tar * 100:.1f}% | {m.known_reject_rate * 100:.1f}% | "
-                f"{m.known_misid_rate * 100:.1f}% | {m.unknown_far * 100:.1f}% | {safe_badge} |"
+                f"| {th:.2f} | {mg:.2f} | {m.known_reject_rate * 100:.1f}% | "
+                f"{m.known_misid_rate * 100:.1f}% | {m.unknown_correct_rejects}/{m.total_unknown} |"
             )
-
-            # Chọn policy có FAR = 0, Wrong-ID = 0 và tối đa hóa TAR
-            if is_safe and m.tar >= best_tar:
-                best_tar = m.tar
-                best_policy = {
-                    "distance_threshold": th,
-                    "identity_margin": mg,
-                    "tar": m.tar,
-                    "known_reject_rate": m.known_reject_rate,
-                    "known_misid_rate": m.known_misid_rate,
-                    "unknown_far": m.unknown_far,
-                    "rank1_accuracy": m.rank1_accuracy,
-                }
 
     report_lines.extend([
         "",
@@ -347,41 +326,38 @@ def run_evaluation() -> str:
         "",
         "---",
         "",
-        "## 4. Chính Sách Nhận Diện Khuyến Nghị (Locked Recognition Policy)",
-        f"- **Ngưỡng khoảng cách tối đa ($T_d$)**: {best_policy.get('distance_threshold', 0.50):.2f}",
-        f"- **Ngưỡng phân biệt tối thiểu ($T_m$)**: {best_policy.get('identity_margin', 0.05):.2f}",
-        "- **Chiến lược gom mẫu**: `min_distance` (kết hợp với bộ lọc near-duplicate pHash khi enrollment)",
-        "- **Chính sách an toàn**: Tuyệt đối không cho phép Wrong-ID ($KMR = 0%$) và nhận nhầm người lạ ($FAR = 0%$).",
+        "## 4. Kết luận",
+        "- Matcher math đã chạy qua dữ liệu tổng hợp.",
+        "- Kết quả này **không phải** độ chính xác camera và không được dùng để chọn threshold production.",
+        "- ``deployable = false``: cần private validation/test session để tạo policy.",
     ])
 
     content = "\n".join(report_lines)
     report_path = RESULTS_DIR / "evaluation_report.md"
     report_path.write_text(content, encoding="utf-8")
 
-    # Xuất Recognition Policy Artifact chuẩn JSON
-    policy_artifact = {
-        "schema_version": 1,
-        "embedding_model": "dlib_face_recognition_resnet_v1",
-        "embedding_dim": 128,
-        "distance_metric": "euclidean_l2",
-        "distance_threshold": best_policy.get("distance_threshold", 0.50),
-        "identity_margin": best_policy.get("identity_margin", 0.05),
-        "aggregation_strategy": "min_distance",
-        "confirmation_frames": 3,
-        "liveness_policy": "ear-blink-v1",
-        "benchmark_type": "synthetic_sanity_benchmark" if is_synthetic else "real_private_evaluation",
-        "selected_on": "validation",
-        "operating_metrics": best_policy,
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-    }
-    policy_path = RESULTS_DIR / "recognition_policy.json"
-    policy_path.write_text(json.dumps(policy_artifact, indent=2, ensure_ascii=False), encoding="utf-8")
+    sanity_path = RESULTS_DIR / "sanity_report.json"
+    sanity_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_type": "synthetic_sanity_check",
+                "deployable": False,
+                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "known_samples": sum(1 for s in eval_samples if s.is_known),
+                "unknown_samples": sum(1 for s in eval_samples if not s.is_known),
+                "note": "Không dùng để hiệu chuẩn biometric threshold.",
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     LOGGER.info("Đã tạo báo cáo đánh giá tại %s", report_path)
-    LOGGER.info("Đã tạo Recognition Policy Artifact tại %s", policy_path)
+    LOGGER.info("Đã tạo synthetic sanity report tại %s", sanity_path)
     return content
 
 
 if __name__ == "__main__":
     run_evaluation()
-

@@ -7,7 +7,7 @@ Dự án không phân phối ảnh khuôn mặt hoặc embedding thật. Ngườ
 - Ảnh JPEG/PNG, tối đa 8 MB.
 - Chính xác một khuôn mặt trong mỗi ảnh.
 - Khuôn mặt tối thiểu 100 x 100 px.
-- Khuyến nghị 3-5 ảnh/người với ánh sáng và góc nhìn khác nhau.
+- Application flow yêu cầu tối thiểu 5 ảnh/người với ánh sáng và góc nhìn khác nhau.
 
 ## Quyền riêng tư
 
@@ -18,4 +18,4 @@ Dự án không phân phối ảnh khuôn mặt hoặc embedding thật. Ngườ
 
 ## Protocol đánh giá đề xuất
 
-Tách danh tính và ảnh thành enrollment, validation và test trước khi hiệu chỉnh threshold. Chọn threshold trên validation; chỉ dùng test để báo cáo FAR, FRR, TAR và latency. Không có metric nào được công bố trong repository cho đến khi có tập dữ liệu có consent và script tái tạo kết quả.
+Tạo `data/private/manifest.json` với `identity_id`, `role`, `path`, `split` và `capture_session`. Tách enrollment, validation và test theo capture session; hash trùng, pHash near-duplicate hoặc dùng chung session phải fail. Chọn threshold trên validation; chỉ dùng test để báo cáo FAR, wrong-ID, reject và latency. Không có metric nào được công bố cho đến khi có tập dữ liệu có consent và script tái tạo kết quả.

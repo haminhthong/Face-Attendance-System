@@ -7,8 +7,8 @@ chính sách lưu trữ sinh trắc học (GDPR retention) và ghi nhật ký au
 
 from __future__ import annotations
 
-import sqlite3
 import logging
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
@@ -16,7 +16,8 @@ import numpy as np
 import pandas as pd
 
 from . import config
-from .config import BIOMETRIC_RETENTION_DAYS, DB_PATH, FACE_TOLERANCE
+from .config import BIOMETRIC_RETENTION_DAYS, DB_PATH  # noqa: F401 - giữ API test/legacy
+from .policy import DEFAULT_RECOGNITION_POLICY, RecognitionPolicy
 from .utils import (
     display_datetime,
     normalize_course_code,
@@ -65,7 +66,10 @@ def init_database() -> None:
         full_name TEXT NOT NULL,
         class_name TEXT NOT NULL,
         active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-        consent_at_utc TEXT NOT NULL,
+        consent_at_utc TEXT,
+        consent_policy_version TEXT,
+        consent_status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (consent_status IN ('pending', 'granted', 'revoked')),
         created_at_utc TEXT NOT NULL,
         updated_at_utc TEXT NOT NULL
     );
@@ -75,10 +79,15 @@ def init_database() -> None:
         student_id INTEGER NOT NULL,
         embedding BLOB NOT NULL,
         image_sha256 TEXT NOT NULL,
+        image_phash TEXT,
         blur_score REAL NOT NULL,
         brightness REAL NOT NULL,
         face_width INTEGER NOT NULL,
         face_height INTEGER NOT NULL,
+        embedding_dim INTEGER NOT NULL DEFAULT 128,
+        embedding_model TEXT NOT NULL DEFAULT 'dlib_face_recognition_resnet_v1',
+        embedding_model_version TEXT NOT NULL DEFAULT '1',
+        revoked_at_utc TEXT,
         created_at_utc TEXT NOT NULL,
         UNIQUE (student_id, image_sha256),
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
@@ -137,6 +146,10 @@ def init_database() -> None:
         liveness_policy TEXT DEFAULT 'ear_blink_v1',
         recognition_policy_version TEXT DEFAULT 'face-policy-v1',
         confirmation_frames INTEGER DEFAULT 3,
+        stable_duration_ms INTEGER DEFAULT 0,
+        aggregation_strategy TEXT DEFAULT 'top_k_mean',
+        embedding_model_version TEXT DEFAULT '1',
+        recognition_policy_hash TEXT,
         original_status TEXT,
         final_status TEXT,
         corrected_by TEXT,
@@ -152,6 +165,32 @@ def init_database() -> None:
         event_type TEXT NOT NULL,
         event_detail TEXT NOT NULL,
         created_at_utc TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS biometric_consents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        policy_version TEXT NOT NULL,
+        granted_at_utc TEXT NOT NULL,
+        revoked_at_utc TEXT,
+        status TEXT NOT NULL CHECK (status IN ('granted', 'revoked')),
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS recognition_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        candidate_student_id INTEGER,
+        decision TEXT NOT NULL,
+        rejection_reason TEXT,
+        distance REAL,
+        margin REAL,
+        policy_version TEXT NOT NULL,
+        liveness_passed INTEGER NOT NULL DEFAULT 0,
+        stable_duration_ms INTEGER NOT NULL DEFAULT 0,
+        created_at_utc TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES attendance_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (candidate_student_id) REFERENCES students(id) ON DELETE SET NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_embeddings_student
@@ -179,6 +218,10 @@ def init_database() -> None:
             ("liveness_policy", "TEXT DEFAULT 'ear_blink_v1'"),
             ("recognition_policy_version", "TEXT DEFAULT 'face-policy-v1'"),
             ("confirmation_frames", "INTEGER DEFAULT 3"),
+            ("stable_duration_ms", "INTEGER DEFAULT 0"),
+            ("aggregation_strategy", "TEXT DEFAULT 'top_k_mean'"),
+            ("embedding_model_version", "TEXT DEFAULT '1'"),
+            ("recognition_policy_hash", "TEXT"),
             ("original_status", "TEXT"),
             ("final_status", "TEXT"),
             ("corrected_by", "TEXT"),
@@ -188,6 +231,33 @@ def init_database() -> None:
         for col_name, col_type in evidence_columns:
             if col_name not in columns:
                 connection.execute(f"ALTER TABLE attendance ADD COLUMN {col_name} {col_type}")
+
+        student_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(students)").fetchall()
+        }
+        for col_name, col_type in [
+            ("consent_policy_version", "TEXT"),
+            ("consent_status", "TEXT NOT NULL DEFAULT 'pending'"),
+        ]:
+            if col_name not in student_columns:
+                connection.execute(f"ALTER TABLE students ADD COLUMN {col_name} {col_type}")
+
+        embedding_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(face_embeddings)").fetchall()
+        }
+        for col_name, col_type in [
+            ("image_phash", "TEXT"),
+            ("embedding_dim", "INTEGER NOT NULL DEFAULT 128"),
+            (
+                "embedding_model",
+                "TEXT NOT NULL DEFAULT 'dlib_face_recognition_resnet_v1'",
+            ),
+            ("embedding_model_version", "TEXT NOT NULL DEFAULT '1'"),
+            ("revoked_at_utc", "TEXT"),
+        ]:
+            if col_name not in embedding_columns:
+                connection.execute(f"ALTER TABLE face_embeddings ADD COLUMN {col_name} {col_type}")
 
         migration_key = "session_roster_migrated_v1"
         migrated = connection.execute(
@@ -223,6 +293,46 @@ def audit(connection: sqlite3.Connection, event_type: str, detail: str) -> None:
     )
 
 
+def log_recognition_attempt(
+    session_id: int,
+    decision: str,
+    policy_version: str,
+    rejection_reason: str | None = None,
+    candidate_student_id: int | None = None,
+    distance: float | None = None,
+    margin: float | None = None,
+    liveness_passed: bool = False,
+    stable_duration_ms: int = 0,
+) -> None:
+    """Lưu telemetry không chứa raw image hoặc unknown embedding."""
+    try:
+        with get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO recognition_attempts(
+                    session_id, candidate_student_id, decision, rejection_reason,
+                    distance, margin, policy_version, liveness_passed,
+                    stable_duration_ms, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    candidate_student_id,
+                    decision,
+                    rejection_reason,
+                    distance,
+                    margin,
+                    policy_version,
+                    int(liveness_passed),
+                    int(stable_duration_ms),
+                    utc_iso(),
+                ),
+            )
+    except sqlite3.Error:
+        # Telemetry không được làm hỏng quyết định nghiệp vụ chính.
+        LOGGER.warning("Không thể ghi recognition attempt cho session=%s", session_id)
+
+
 def get_setting(key: str) -> str | None:
     """Đọc giá trị cấu hình hệ thống từ bảng app_settings."""
     with get_connection() as connection:
@@ -249,7 +359,11 @@ def set_setting(key: str, value: str) -> None:
 
 
 def upsert_student(
-    student_code: str, full_name: str, class_name: str
+    student_code: str,
+    full_name: str,
+    class_name: str,
+    consent_given: bool | None = None,
+    consent_policy_version: str | None = None,
 ) -> sqlite3.Row:
     """Thêm mới hoặc cập nhật hồ sơ sinh viên dựa trên mã sinh viên (MSSV).
 
@@ -267,26 +381,88 @@ def upsert_student(
     if not (1 <= len(class_value) <= 80):
         raise ValueError("Tên lớp phải dài từ 1 đến 80 ký tự.")
 
+    if consent_given is False:
+        raise ValueError("Không thể tạo/cập nhật hồ sơ khi chưa có consent rõ ràng.")
+
     now = utc_iso()
+    policy_version = consent_policy_version or DEFAULT_RECOGNITION_POLICY.policy_version
     with get_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO students(
-                student_code, full_name, class_name, active,
-                consent_at_utc, created_at_utc, updated_at_utc
-            ) VALUES (?, ?, ?, 1, ?, ?, ?)
-            ON CONFLICT(student_code) DO UPDATE SET
-                full_name = excluded.full_name,
-                class_name = excluded.class_name,
-                active = 1,
-                updated_at_utc = excluded.updated_at_utc
-            """,
-            (code, name, class_value, now, now, now),
-        )
+        existing = connection.execute(
+            "SELECT id FROM students WHERE student_code = ?", (code,)
+        ).fetchone()
+        if existing is None:
+            # Khi caller chưa truyền consent, chỉ tạo hồ sơ pending để tương thích
+            # với các tool seed cũ; application enrollment luôn phải truyền True.
+            consent_at = now if consent_given is True else ""
+            status = "granted" if consent_given is True else "pending"
+            connection.execute(
+                """
+                INSERT INTO students(
+                    student_code, full_name, class_name, active,
+                    consent_at_utc, consent_policy_version, consent_status,
+                    created_at_utc, updated_at_utc
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                """,
+                (code, name, class_value, consent_at, policy_version if consent_given else None,
+                 status, now, now),
+            )
+            if consent_given is True:
+                connection.execute(
+                    """
+                    INSERT INTO biometric_consents(
+                        student_id, policy_version, granted_at_utc, status
+                    )
+                    SELECT id, ?, ?, 'granted'
+                    FROM students WHERE student_code = ?
+                    """,
+                    (policy_version, now, code),
+                )
+        else:
+            connection.execute(
+                """
+                UPDATE students
+                SET full_name = ?, class_name = ?, active = 1, updated_at_utc = ?
+                WHERE student_code = ?
+                """,
+                (name, class_value, now, code),
+            )
+            if consent_given is True:
+                connection.execute(
+                    """
+                    UPDATE students
+                    SET consent_at_utc = ?, consent_policy_version = ?,
+                        consent_status = 'granted', active = 1, updated_at_utc = ?
+                    WHERE student_code = ?
+                    """,
+                    (now, policy_version, now, code),
+                )
+                connection.execute(
+                    """
+                    UPDATE biometric_consents
+                    SET status = 'revoked', revoked_at_utc = ?
+                    WHERE student_id = (SELECT id FROM students WHERE student_code = ?)
+                      AND status = 'granted'
+                    """,
+                    (now, code),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO biometric_consents(
+                        student_id, policy_version, granted_at_utc, status
+                    )
+                    SELECT id, ?, ?, 'granted'
+                    FROM students WHERE student_code = ?
+                    """,
+                    (policy_version, now, code),
+                )
         row = connection.execute(
             "SELECT * FROM students WHERE student_code = ?", (code,)
         ).fetchone()
-        audit(connection, "student_upserted", code)
+        audit(
+            connection,
+            "student_upserted",
+            f"{code};consent={'granted' if consent_given is True else 'unchanged_or_pending'}",
+        )
         if row is None:
             raise RuntimeError("Không thể tạo hồ sơ sinh viên.")
         return row
@@ -300,6 +476,8 @@ def save_embedding(
     brightness: float,
     face_width: int,
     face_height: int,
+    policy: RecognitionPolicy | None = None,
+    phash: str | None = None,
 ) -> bool:
     """Lưu trữ vector đặc trưng khuôn mặt (128D BLOB) và thông số chất lượng ảnh.
 
@@ -308,24 +486,33 @@ def save_embedding(
     Returns:
         bool: True nếu thêm mới thành công, False nếu ảnh bị trùng sha256 hash.
     """
-    payload = sqlite3.Binary(np.asarray(embedding, dtype=np.float64).tobytes())
+    selected_policy = policy or DEFAULT_RECOGNITION_POLICY
+    vector = np.asarray(embedding, dtype=np.float64)
+    if vector.shape != (selected_policy.embedding_dimension,) or not np.isfinite(vector).all():
+        raise ValueError("Embedding phải có 128 giá trị hữu hạn.")
+    payload = sqlite3.Binary(vector.tobytes())
     with get_connection() as connection:
         try:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO face_embeddings(
                     student_id, embedding, image_sha256, blur_score,
-                    brightness, face_width, face_height, created_at_utc
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    image_phash, brightness, face_width, face_height, embedding_dim,
+                    embedding_model, embedding_model_version, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     student_id,
                     payload,
                     image_hash,
                     blur_score,
+                    phash,
                     brightness,
                     face_width,
                     face_height,
+                    selected_policy.embedding_dimension,
+                    selected_policy.embedding_model,
+                    selected_policy.embedding_model_version,
                     utc_iso(),
                 ),
             )
@@ -355,6 +542,48 @@ def student_table() -> pd.DataFrame:
     return frame
 
 
+def get_student_by_code(student_code: str) -> sqlite3.Row | None:
+    """Lấy hồ sơ sinh viên theo mã để kiểm tra profile biometric hiện có."""
+    code = normalize_student_code(student_code)
+    with get_connection() as connection:
+        return connection.execute(
+            "SELECT * FROM students WHERE student_code = ?", (code,)
+        ).fetchone()
+
+
+def get_student_embeddings(
+    student_id: int,
+    policy: RecognitionPolicy | None = None,
+) -> list[np.ndarray]:
+    """Đọc các embedding còn hiệu lực của một sinh viên theo model version."""
+    selected_policy = policy or DEFAULT_RECOGNITION_POLICY
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT embedding, embedding_dim
+            FROM face_embeddings
+            WHERE student_id = ?
+              AND revoked_at_utc IS NULL
+              AND embedding_dim = ?
+              AND embedding_model = ?
+              AND embedding_model_version = ?
+            ORDER BY id
+            """,
+            (
+                student_id,
+                selected_policy.embedding_dimension,
+                selected_policy.embedding_model,
+                selected_policy.embedding_model_version,
+            ),
+        ).fetchall()
+    vectors: list[np.ndarray] = []
+    for row in rows:
+        vector = np.frombuffer(row["embedding"], dtype=np.float64).copy()
+        if vector.shape == (selected_policy.embedding_dimension,) and np.isfinite(vector).all():
+            vectors.append(vector)
+    return vectors
+
+
 def remove_student_biometrics(student_id: int, audit_event: str = "student_biometrics_removed") -> None:
     """Xóa vector khuôn mặt và vô hiệu hóa sinh viên.
 
@@ -365,7 +594,19 @@ def remove_student_biometrics(student_id: int, audit_event: str = "student_biome
     with get_connection() as connection:
         connection.execute("DELETE FROM face_embeddings WHERE student_id = ?", (student_id,))
         connection.execute(
-            "UPDATE students SET active = 0, updated_at_utc = ? WHERE id = ?",
+            """
+            UPDATE biometric_consents
+            SET status = 'revoked', revoked_at_utc = ?
+            WHERE student_id = ? AND status = 'granted'
+            """,
+            (utc_iso(), student_id),
+        )
+        connection.execute(
+            """
+            UPDATE students
+            SET active = 0, consent_status = 'revoked', updated_at_utc = ?
+            WHERE id = ?
+            """,
             (utc_iso(), student_id),
         )
         audit(connection, audit_event, f"student_id={student_id}")
@@ -383,7 +624,26 @@ def revoke_student_consent(student_id: int) -> None:
     Args:
         student_id (int): ID sinh viên.
     """
-    remove_student_biometrics(student_id, audit_event="consent_revoked")
+    now = utc_iso()
+    with get_connection() as connection:
+        connection.execute("DELETE FROM face_embeddings WHERE student_id = ?", (student_id,))
+        connection.execute(
+            """
+            UPDATE biometric_consents
+            SET status = 'revoked', revoked_at_utc = ?
+            WHERE student_id = ? AND status = 'granted'
+            """,
+            (now, student_id),
+        )
+        connection.execute(
+            """
+            UPDATE students
+            SET active = 0, consent_status = 'revoked', updated_at_utc = ?
+            WHERE id = ?
+            """,
+            (now, student_id),
+        )
+        audit(connection, "consent_revoked", f"student_id={student_id}")
 
 
 def purge_expired_biometrics(retention_days: int = BIOMETRIC_RETENTION_DAYS) -> int:
@@ -651,10 +911,14 @@ def mark_attendance(
     student_id: int,
     distance: float,
     identity_margin: float = 0.0,
-    margin_threshold: float = 0.05,
-    liveness_policy: str = "ear_blink_v1",
-    policy_version: str = "face-policy-v1",
-    confirmation_frames: int = 3,
+    margin_threshold: float = DEFAULT_RECOGNITION_POLICY.identity_margin,
+    liveness_policy: str = DEFAULT_RECOGNITION_POLICY.liveness_policy,
+    policy_version: str = DEFAULT_RECOGNITION_POLICY.policy_version,
+    confirmation_frames: int = DEFAULT_RECOGNITION_POLICY.minimum_observations,
+    stable_duration_ms: int = 0,
+    aggregation_strategy: str = DEFAULT_RECOGNITION_POLICY.aggregation_strategy,
+    embedding_model_version: str = DEFAULT_RECOGNITION_POLICY.embedding_model_version,
+    recognition_policy_hash: str | None = None,
     source: str = "face_webrtc",
     tolerance: float | None = None,
 ) -> tuple[str, str]:
@@ -679,7 +943,11 @@ def mark_attendance(
     Returns:
         tuple[str, str]: (mã_kết_quả, thông_báo_chi_tiết).
     """
-    actual_tolerance = tolerance if tolerance is not None else config.FACE_TOLERANCE
+    actual_tolerance = (
+        tolerance
+        if tolerance is not None
+        else DEFAULT_RECOGNITION_POLICY.distance_threshold
+    )
     if not np.isfinite(distance) or not 0 <= distance <= actual_tolerance:
         return "rejected", "Kết quả nhận diện không đạt ngưỡng cho phép."
 
@@ -744,7 +1012,9 @@ def mark_attendance(
                 recognition_distance, threshold_used, source,
                 identity_margin, margin_threshold, liveness_policy,
                 recognition_policy_version, confirmation_frames
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , stable_duration_ms, aggregation_strategy,
+                embedding_model_version, recognition_policy_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -759,6 +1029,10 @@ def mark_attendance(
                 str(liveness_policy),
                 str(policy_version),
                 int(confirmation_frames),
+                int(stable_duration_ms),
+                str(aggregation_strategy),
+                str(embedding_model_version),
+                recognition_policy_hash,
             ),
         )
         audit(
@@ -881,4 +1155,3 @@ def manual_attendance_correction(
         return False, "Lỗi cơ sở dữ liệu khi sửa điểm danh."
     finally:
         connection.close()
-

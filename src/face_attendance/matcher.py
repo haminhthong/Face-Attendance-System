@@ -2,8 +2,8 @@
 
 Thực hiện tính khoảng cách Euclidean L2 giữa vector khuôn mặt đầu vào (128D) và các mẫu tham chiếu,
 gom nhóm theo từng sinh viên và áp dụng cơ chế từ chối người lạ (Unknown Rejection) bằng hai ngưỡng:
-1. Ngưỡng khoảng cách tối đa (FACE_TOLERANCE).
-2. Ngưỡng chênh lệch giữa Top-1 và Top-2 (MIN_IDENTITY_MARGIN) nhằm loại bỏ sự mơ hồ danh tính.
+1. Ngưỡng khoảng cách tối đa từ RecognitionPolicy.
+2. Ngưỡng chênh lệch giữa Top-1 và Top-2 từ RecognitionPolicy nhằm loại bỏ sự mơ hồ danh tính.
 """
 
 from __future__ import annotations
@@ -56,15 +56,14 @@ def tim_danh_tinh_tot_nhat(
     danh_sach_mau: Sequence[MauKhuonMat],
     nguong_khoang_cach: float,
     nguong_phan_biet: float,
-    strategy: AggregationStrategy | str = AggregationStrategy.MIN_DISTANCE,
+    strategy: AggregationStrategy | str = AggregationStrategy.TOP_K_MEAN,
     top_k: int = 2,
 ) -> KetQuaSoKhop:
     """Xác định danh tính phù hợp nhất từ vector đầu vào sử dụng thuật toán Open-Set Matching.
 
     Hỗ trợ 3 chiến lược gom cụm mẫu (Identity Aggregation Strategies):
-    1. MIN_DISTANCE: Khoảng cách nhỏ nhất đến bất kỳ mẫu nào của sinh viên.
-    2. CENTROID: Khoảng cách tới vector trọng tâm (L2-normalized centroid) của sinh viên.
-    3. TOP_K_MEAN: Trung bình khoảng cách của Top-K mẫu gần nhất của sinh viên.
+    1. TOP_K_MEAN: Trung bình khoảng cách của Top-K mẫu gần nhất của sinh viên.
+    2. MIN_DISTANCE/CENTROID: Chỉ giữ cho benchmark và nghiên cứu, không dùng runtime.
 
     Args:
         embedding (np.ndarray): Vector khuôn mặt đầu vào (128 chiều).
@@ -113,10 +112,15 @@ def tim_danh_tinh_tot_nhat(
         elif strat == AggregationStrategy.CENTROID:
             all_embs = np.array([m.embedding for _, m in mau_list], dtype=np.float64)
             centroid = np.mean(all_embs, axis=0)
-            norm = np.linalg.norm(centroid)
-            if norm > 1e-9:
-                centroid = centroid / norm
-            rep_distance = float(np.linalg.norm(centroid - vector))
+            # Centroid phải dùng cùng normalization contract với query.
+            centroid_norm = np.linalg.norm(centroid)
+            query_norm = np.linalg.norm(vector)
+            if centroid_norm <= 1e-9 or query_norm <= 1e-9:
+                rep_distance = float(np.linalg.norm(centroid - vector))
+            else:
+                rep_distance = float(
+                    np.linalg.norm(centroid / centroid_norm - vector / query_norm)
+                )
         elif strat == AggregationStrategy.TOP_K_MEAN:
             k = max(1, min(top_k, len(mau_list)))
             rep_distance = float(np.mean([d for d, _ in mau_list[:k]]))
@@ -156,4 +160,3 @@ def tim_danh_tinh_tot_nhat(
         student_id_tot_nhat=id_tot_nhat,
         student_id_thu_hai=id_thu_hai,
     )
-

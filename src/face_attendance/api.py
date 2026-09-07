@@ -11,9 +11,9 @@ Bảo mật bằng Header X-API-Key với cơ chế so sánh hằng số thời 
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -26,7 +26,7 @@ from .application import (
     record_biometric_attendance,
     record_manual_attendance,
 )
-from .config import API_KEY, FACE_TOLERANCE
+from .config import API_KEY, FACE_TOLERANCE, RECOGNITION_POLICY
 from .database import (
     attendance_report,
     init_database,
@@ -94,7 +94,15 @@ class YeuCauDiemDanhBiometric(BaseModel):
     margin: float = Field(ge=0.0, description="Chênh lệch giữa Top-1 và Top-2 (Margin)")
     liveness_passed: bool = Field(description="Bằng chứng kiểm tra liveness thành công")
     confirmation_frames: int = Field(default=3, ge=1, description="Số khung hình nhận diện liên tiếp hợp lệ")
-    policy_version: str = Field(default="face-policy-v1", description="Phiên bản chính sách")
+    policy_version: str = Field(default=RECOGNITION_POLICY.policy_version, description="Phiên bản chính sách")
+    distance_threshold: float = Field(default=RECOGNITION_POLICY.distance_threshold, ge=0.0, le=2.0)
+    margin_threshold: float = Field(default=RECOGNITION_POLICY.identity_margin, ge=0.0, le=2.0)
+    aggregation_strategy: str = Field(default=RECOGNITION_POLICY.aggregation_strategy)
+    embedding_model: str = Field(default=RECOGNITION_POLICY.embedding_model)
+    embedding_model_version: str = Field(default=RECOGNITION_POLICY.embedding_model_version)
+    stable_duration_ms: int = Field(default=RECOGNITION_POLICY.stable_duration_ms, ge=0)
+    liveness_policy: str = Field(default=RECOGNITION_POLICY.liveness_policy)
+    recognition_policy_hash: str = Field(default=RECOGNITION_POLICY.policy_hash)
 
 
 class YeuCauDiemDanhManual(BaseModel):
@@ -129,6 +137,26 @@ def xac_thuc_api_key(x_api_key: str | None = Header(default=None)) -> None:
 def health() -> dict[str, str]:
     """Endpoint công khai dùng cho Load Balancer hoặc Docker health check."""
     return {"status": "ok"}
+
+
+@app.get(
+    "/policy",
+    dependencies=[Depends(xac_thuc_api_key)],
+    summary="Lấy phiên bản policy đang chạy",
+)
+def policy_metadata() -> dict[str, object]:
+    """Expose metadata để client và audit tool không phải tự đoán threshold."""
+    return {
+        "policy_version": RECOGNITION_POLICY.policy_version,
+        "policy_hash": RECOGNITION_POLICY.policy_hash,
+        "embedding_model": RECOGNITION_POLICY.embedding_model,
+        "embedding_model_version": RECOGNITION_POLICY.embedding_model_version,
+        "embedding_dimension": RECOGNITION_POLICY.embedding_dimension,
+        "aggregation_strategy": RECOGNITION_POLICY.aggregation_strategy,
+        "distance_threshold": RECOGNITION_POLICY.distance_threshold,
+        "identity_margin": RECOGNITION_POLICY.identity_margin,
+        "calibrated": RECOGNITION_POLICY.calibrated,
+    }
 
 
 @app.get(
@@ -167,13 +195,13 @@ def attendance(
         )
         return res.to_dict()
     except DuplicateAttendanceError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except SessionClosedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except StudentNotInRosterError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     except AttendanceError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 @app.post(
@@ -183,6 +211,22 @@ def attendance(
 )
 def attendance_biometric(request: YeuCauDiemDanhBiometric) -> dict[str, Any]:
     """Nhận RecognitionDecision đầy đủ từ vision pipeline và thực hiện ghi nhận."""
+    policy_matches = (
+        request.policy_version == RECOGNITION_POLICY.policy_version
+        and request.distance_threshold == RECOGNITION_POLICY.distance_threshold
+        and request.margin_threshold == RECOGNITION_POLICY.identity_margin
+        and request.aggregation_strategy == RECOGNITION_POLICY.aggregation_strategy
+        and request.embedding_model == RECOGNITION_POLICY.embedding_model
+        and request.embedding_model_version == RECOGNITION_POLICY.embedding_model_version
+        and request.stable_duration_ms == RECOGNITION_POLICY.stable_duration_ms
+        and request.liveness_policy == RECOGNITION_POLICY.liveness_policy
+        and request.recognition_policy_hash == RECOGNITION_POLICY.policy_hash
+    )
+    if not policy_matches:
+        raise HTTPException(
+            status_code=409,
+            detail="Recognition policy của client không khớp policy đang chạy trên server.",
+        )
     decision = RecognitionDecision(
         student_id=request.student_id,
         student_code=request.student_code,
@@ -193,22 +237,29 @@ def attendance_biometric(request: YeuCauDiemDanhBiometric) -> dict[str, Any]:
         liveness_passed=request.liveness_passed,
         confirmation_frames=request.confirmation_frames,
         policy_version=request.policy_version,
+        distance_threshold=request.distance_threshold,
+        margin_threshold=request.margin_threshold,
+        aggregation_strategy=request.aggregation_strategy,
+        embedding_model=request.embedding_model,
+        embedding_model_version=request.embedding_model_version,
+        stable_duration_ms=request.stable_duration_ms,
+        liveness_policy=request.liveness_policy,
+        recognition_policy_hash=request.recognition_policy_hash,
     )
     try:
         res = record_biometric_attendance(
             session_id=request.session_id,
             decision=decision,
-            tolerance=FACE_TOLERANCE,
         )
         return res.to_dict()
     except DuplicateAttendanceError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except SessionClosedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except StudentNotInRosterError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     except AttendanceError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
 @app.post(
@@ -228,7 +279,6 @@ def attendance_manual(request: YeuCauDiemDanhManual) -> dict[str, Any]:
         )
         return res.to_dict()
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi điều chỉnh điểm danh: {exc}")
-
+        raise HTTPException(status_code=500, detail=f"Lỗi khi điều chỉnh điểm danh: {exc}") from None

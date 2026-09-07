@@ -18,11 +18,11 @@ data/
 
 from __future__ import annotations
 
-from hashlib import sha256
 import json
 import logging
+from hashlib import sha256
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Any, Dict, List
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -89,6 +89,10 @@ def check_data_leakage() -> Dict[str, List[str]]:
     Returns:
         Dict[str, List[str]]: Mapping từ SHA-256 hash đến danh sách đường dẫn file bị lặp.
     """
+    manifest_path = PRIVATE_DIR / "manifest.json"
+    if manifest_path.exists():
+        validate_capture_manifest(manifest_path)
+
     hashes: Dict[str, List[Path]] = {}
     valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -116,6 +120,55 @@ def check_data_leakage() -> Dict[str, List[str]]:
     return duplicates
 
 
+def validate_capture_manifest(manifest_path: Path | None = None) -> None:
+    """É enforce capture-session split trong private manifest.
+
+    Image gần nhau giữa các split phải bị loại ở bước pHash bên dưới; còn
+    manifest này chặn trước các lỗi cấu trúc như dùng chung session hoặc đưa
+    unknown identity vào enrollment.
+    """
+    path = manifest_path or PRIVATE_DIR / "manifest.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    identities = data.get("identities")
+    if not isinstance(identities, list) or not identities:
+        raise ValueError("Manifest phải có identities không rỗng.")
+
+    seen_hashes: dict[str, str] = {}
+    for identity in identities:
+        identity_id = identity.get("identity_id")
+        role = identity.get("role")
+        if role not in {"known", "unknown"}:
+            raise ValueError(f"{identity_id}: role phải là known hoặc unknown.")
+        captures = identity.get("captures", [])
+        split_sessions: dict[str, set[str]] = {}
+        for capture in captures:
+            split = capture.get("split")
+            session = capture.get("capture_session")
+            relative_path = capture.get("path")
+            if split not in {"enrollment", "validation", "test"} or not session or not relative_path:
+                raise ValueError(f"{identity_id}: capture thiếu split/session/path hợp lệ.")
+            image_path = BASE_DIR / relative_path
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Không tìm thấy ảnh trong manifest: {image_path}")
+            digest = calculate_file_hash(image_path)
+            if digest in seen_hashes:
+                raise ValueError(
+                    f"Trùng SHA-256 giữa các split: {seen_hashes[digest]} và {relative_path}"
+                )
+            seen_hashes[digest] = relative_path
+            split_sessions.setdefault(split, set()).add(str(session))
+
+        if role == "known" and not split_sessions.get("enrollment"):
+            raise ValueError(f"{identity_id}: known identity phải có enrollment.")
+        if role == "unknown" and split_sessions.get("enrollment"):
+            raise ValueError(f"{identity_id}: unknown identity không được có enrollment.")
+        if (
+            split_sessions.get("enrollment", set()) & split_sessions.get("validation", set())
+            or split_sessions.get("enrollment", set()) & split_sessions.get("test", set())
+        ):
+            raise ValueError(f"{identity_id}: không được dùng chung capture_session với enrollment.")
+
+
 def check_near_duplicates_phash(threshold: int = 3) -> Dict[str, List[str]]:
     """Phát hiện ảnh gần trùng (near-duplicates) giữa các tập dữ liệu bằng Perceptual Hash (pHash).
 
@@ -126,8 +179,8 @@ def check_near_duplicates_phash(threshold: int = 3) -> Dict[str, List[str]]:
         Dict[str, List[str]]: Danh sách các cặp ảnh bị nghi ngờ rò rỉ hoặc quá giống nhau.
     """
     try:
-        from PIL import Image
         import imagehash
+        from PIL import Image
     except ImportError:
         LOGGER.info("Thư viện imagehash chưa được cài đặt; bỏ qua kiểm tra pHash.")
         return {}
@@ -175,4 +228,3 @@ if __name__ == "__main__":
     init_evaluation_dataset_structure()
     check_data_leakage()
     check_near_duplicates_phash()
-

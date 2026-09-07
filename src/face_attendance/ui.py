@@ -10,14 +10,15 @@ from __future__ import annotations
 import re
 import sqlite3
 import time
-from datetime import date, time as dt_time
+from datetime import date
+from datetime import time as dt_time
 from typing import Any
 
 import streamlit as st
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
-from .application import record_manual_attendance
-from .config import FACE_TOLERANCE
+from .application import process_student_enrollment, record_manual_attendance
+from .config import RECOGNITION_POLICY
 from .database import (
     attendance_report,
     change_session_status,
@@ -36,7 +37,6 @@ from .database import (
 from .recognition import (
     AttendanceVideoProcessor,
     RecognitionEngine,
-    enroll_student_images,
     load_templates,
 )
 from .utils import display_datetime, local_datetime, make_pin_hash, verify_pin
@@ -127,7 +127,7 @@ def render_attendance_page() -> None:
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("Sinh viên đã đăng ký", unique_students)
     col_b.metric("Ảnh tham chiếu", len(templates))
-    col_c.metric("Ngưỡng nhận diện", f"≤ {FACE_TOLERANCE:.2f}")
+    col_c.metric("Ngưỡng nhận diện", f"≤ {RECOGNITION_POLICY.distance_threshold:.2f}")
 
     if not templates:
         st.error("Chưa có dữ liệu khuôn mặt. Hãy đăng ký sinh viên trong khu vực quản trị.")
@@ -170,7 +170,7 @@ def render_attendance_page() -> None:
 def render_student_management() -> None:
     st.subheader("Đăng ký khuôn mặt sinh viên")
     st.info(
-        "Nên dùng 3-5 ảnh/người ở góc nhìn và ánh sáng khác nhau. "
+        "Cần tối thiểu 5 ảnh/người ở góc nhìn và ánh sáng khác nhau. "
         "Hệ thống chỉ lưu vector 128 chiều và không lưu ảnh gốc."
     )
     student_code = st.text_input("Mã sinh viên", placeholder="23DH113428")
@@ -193,8 +193,13 @@ def render_student_management() -> None:
             if captured is not None:
                 sources.append(captured)
             try:
-                saved, messages = enroll_student_images(
-                    student_code, full_name, class_name, sources
+                saved, messages = process_student_enrollment(
+                    student_code,
+                    full_name,
+                    class_name,
+                    sources,
+                    consent_given=consent,
+                    consent_policy_version="biometric-consent-v1",
                 )
                 st.success(f"Đã lưu {saved} ảnh tham chiếu hợp lệ.")
                 for message in messages:
@@ -369,7 +374,7 @@ def render_reports() -> None:
     )
 
     st.divider()
-    st.subheader("Điều chỉnh điểm danh thủ công (Human-in-the-Loop)")
+    st.subheader("Điều chỉnh điểm danh thủ công (Human Oversight / Override)")
     with st.expander("Mở biểu mẫu can thiệp / sửa đổi điểm danh"):
         with get_connection() as conn:
             roster_rows = conn.execute(

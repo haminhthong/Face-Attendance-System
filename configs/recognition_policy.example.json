@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "policy_version": "face-policy-v1",
+  "embedding": {
+    "model": "dlib_face_recognition_resnet_v1",
+    "version": "1",
+    "dimension": 128
+  },
+  "matching": {
+    "metric": "euclidean_l2",
+    "aggregation": "top_k_mean",
+    "top_k": 2,
+    "distance_threshold": 0.5,
+    "identity_margin": 0.05
+  },
+  "temporal": {
+    "minimum_observations": 3,
+    "stable_duration_ms": 500
+  },
+  "liveness": {
+    "mode": "ear_blink_v1",
+    "ttl_seconds": 10.0
+  },
+  "calibrated": false
+}

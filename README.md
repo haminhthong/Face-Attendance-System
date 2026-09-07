@@ -20,10 +20,10 @@ Hệ thống được thiết kế và vận hành theo **Canonical 9-Stage Pipe
 ```mermaid
 flowchart TD
     subgraph Stage1 [1. Biometric Enrollment]
-        A[Student + Consent] --> B[3-5 Images]
+        A[Student + Explicit Consent] --> B[5 Images]
         B --> C[Quality Gate: Blur/Light/Size/Single-Face/pHash]
-        C --> D[128D Encodings]
-        D --> E[Identity Template Store]
+        C --> D[128D Encodings + Identity Consistency]
+        D --> E[Versioned Template Store]
     end
 
     subgraph Stage2 [2. Session Preparation]
@@ -78,17 +78,17 @@ flowchart TD
 ```
 
 ### Chi Tiết 9 Giai Đoạn:
-1. **Biometric Enrollment**: Thu thập 3-5 ảnh kèm sự đồng ý minh bạch (explicit consent). Đi qua Quality Gate kiểm tra kích thước ($\ge 100\text{px}$), độ mờ (Laplacian variance $\ge 45$), ánh sáng, kiểm tra duy nhất 1 mặt, và phát hiện ảnh gần trùng lặp bằng Perceptual Hash (pHash). Trích xuất và lưu vector 128D (không lưu ảnh gốc).
+1. **Biometric Enrollment**: Bắt buộc explicit consent trước khi giải mã ảnh và yêu cầu tối thiểu 5 ảnh. Quality Gate kiểm tra kích thước ($\ge 100\text{px}$), độ mờ, ánh sáng, duy nhất 1 mặt, pHash và consistency giữa các embedding. Trích xuất và lưu vector 128D kèm model/version (không lưu ảnh gốc).
 2. **Session Preparation**: Khi mở buổi học, hệ thống đóng băng danh sách sinh viên vào `session_enrollments` (Frozen Roster Snapshot). Runtime chỉ nạp vector của sinh viên trong môn học, giúp thu hẹp không gian tìm kiếm, giảm rủi ro nhận nhầm và bảo vệ dữ liệu sinh trắc học.
 3. **Real-Time Face Perception**: Khung hình WebRTC được lấy mẫu (sampling 1/3 frame, thu nhỏ $0.25\times$). Áp dụng **Single-Face Policy Gate**: Chỉ tiếp tục xử lý khi khung hình có duy nhất 1 khuôn mặt; nếu phát hiện $\ge 2$ khuôn mặt (`MULTIPLE_FACES`), lập tức dừng pipeline và cảnh báo.
 4. **Open-Set Identity Matching**: So khớp vector đầu vào với danh sách mẫu lớp học theo công thức:
    $$d_1 \le T_d \quad \text{và} \quad d_2 - d_1 \ge T_m$$
-   Hỗ trợ 3 chiến lược gom cụm mẫu: Min Distance (mặc định), Centroid, và Top-2 Mean.
+   Runtime chỉ dùng Top-2 Mean; Min Distance và Centroid chỉ còn cho benchmark. Threshold phải được hiệu chuẩn trên private validation dataset.
 5. **Liveness Verification (Interactive Blink Heuristic)**: Máy trạng thái FSM tỉ lệ mắt Eye Aspect Ratio (EAR): $\text{OPEN} \to \text{CLOSED} \to \text{OPEN} \to \text{VERIFIED}$ với TTL. Ngăn chặn hình thức gian lận bằng ảnh tĩnh in giấy hoặc tablet.
-6. **Temporal Confirmation & Stability**: Đếm chuỗi xác thực liên tiếp ($N=3$ frames) của **cùng một danh tính ổn định** (`identity_track_state`). Nếu nhận diện bị nhảy giữa các mã sinh viên khác nhau, bộ đếm lập tức được làm mới. Kết quả đóng gói thành `RecognitionDecision` DTO.
+6. **Temporal Confirmation & Stability**: Yêu cầu tối thiểu 3 quan sát và identity ổn định ít nhất 500 ms. Nếu nhận diện bị nhảy, mất mặt hoặc có nhiều mặt, attempt bị reset. Kết quả đóng gói thành `RecognitionDecision` chứa policy evidence.
 7. **Attendance Decision Service**: Tách biệt hoàn toàn thị giác máy tính khỏi cơ sở dữ liệu. Tầng nghiệp vụ kiểm tra tính hợp lệ: buổi học đang mở, đúng khung giờ, chưa điểm danh trước đó, sinh viên có trong danh sách snapshot.
 8. **ACID Persistence & Decision Evidence**: Giao dịch SQLite với khóa `BEGIN IMMEDIATE` chống tương tranh (race condition). Lưu trữ đầy đủ bằng chứng quyết định: `recognition_distance`, `identity_margin`, `margin_threshold`, `liveness_policy`, `recognition_policy_version`, `confirmation_frames`.
-9. **Monitoring & Human Review**: Giảng viên có quyền kiểm tra, xác nhận và sửa điểm danh thủ công (First-Class Manual Correction). Mọi can thiệp lưu vết audit trail đầy đủ (`original_status`, `final_status`, `corrected_by`, `correction_reason`, `corrected_at_utc`).
+9. **Monitoring & Human Oversight**: AI confidence cao được ghi tự động; reject/unknown không ghi attendance. Giảng viên có quyền override/sửa thủ công, mọi can thiệp lưu audit trail đầy đủ.
 
 ---
 
@@ -96,15 +96,17 @@ flowchart TD
 
 - **Quy mô mục tiêu**: Phù hợp cho **lớp học quy mô nhỏ đến vừa** (khoảng 30 đến 100 sinh viên/buổi).
 - **Chính sách Single-Face**: Nhận diện **một sinh viên tại một thời điểm**. Khi nhiều người cùng xuất hiện trước camera, hệ thống cảnh báo và từ chối ghi nhận.
-- **Quyền quyết định tối cao (Human-in-the-Loop)**: Quyết định AI chỉ mang tính đề xuất. Giảng viên luôn là người quyết định cuối cùng và có công cụ điều chỉnh trực tiếp trên giao diện.
+- **Human oversight/override**: Quyết định AI confidence cao được ghi tự động; giảng viên có thể sửa sau đó. Đây không phải flow phê duyệt thủ công cho từng lượt.
 - **Giới hạn an ninh**: Kiểm tra chớp mắt là tương tác kiểm tra cơ bản (interactive heuristic), không phải mô hình Deep Learning Presentation Attack Detection (PAD) chống video replay tinh vi.
 
 ---
 
-## 📊 3. Báo Cáo Đánh Giá & Hiệu Chuẩn AI (Evaluation & Calibration Benchmark)
+## 📊 3. Đánh Giá và Hiệu Chuẩn (Evaluation Protocol)
 
 ### ⚠️ Ghi Chú Minh Bạch Về Dữ Liệu Benchmark
-Báo cáo dưới đây được sinh ra từ script `tools/evaluate_matching.py` chạy ở chế độ **Synthetic Matcher Sanity Benchmark** (sử dụng các vector 128D chuẩn hóa L2 mô phỏng để kiểm định tính đúng đắn của logic thuật toán matcher, margin sweep và độ trễ). Báo cáo kiểm thử phần mềm, không đại diện cho độ chính xác sinh trắc học trên camera thực tế khi chưa nạp bộ ảnh thật vào `data/private/`.
+`tools/matcher_sanity_check.py` và `tools/evaluate_matching.py` chỉ chạy **Synthetic Matcher Sanity Check** bằng vector 128D mô phỏng. Báo cáo dùng để kiểm tra toán matcher, margin/reject logic và latency; không đại diện cho độ chính xác sinh trắc học và luôn ghi `deployable: false`.
+
+`tools/evaluate_biometrics.py` là đường duy nhất có thể tạo metadata policy từ private real dataset. Tool fail nếu thiếu `data/private/manifest.json`, không fallback synthetic. Manifest phải tách enrollment/validation/test theo capture session; SHA-256 trùng, pHash gần trùng hoặc dùng chung session giữa enrollment và split đánh giá đều bị loại.
 
 ### 3.1 Phân Phối Khoảng Cách L2 (Genuine vs Impostor)
 ```text
@@ -122,15 +124,15 @@ Báo cáo dưới đây được sinh ra từ script `tools/evaluate_matching.py
   ──────────────────────────────────────────────────────────────────────────
 ```
 
-### 3.2 Lưới Hiệu Chuẩn Khoảng Cách & Margin (Threshold x Margin Grid)
+### 3.2 Grid sanity khoảng cách và margin (không phải production calibration)
 *Tách bạch rõ ràng giữa Known Reject (bị từ chối) và Wrong-ID (nhận nhầm sang SV khác):*
 
-| Khoảng cách ($T_d$) | Margin ($T_m$) | TAR (Đúng SV) | Known Reject (Bị từ chối) | Wrong-ID (Nhận nhầm SV) | Unknown FAR | Đạt chuẩn an toàn? |
+| Khoảng cách ($T_d$) | Margin ($T_m$) | Known Reject | Wrong-ID | Unknown Reject |
 |:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 0.40 | 0.05 | 100.0% | 0.0% | 0.0% | 0.0% | ✅ AN TOÀN |
-| 0.45 | 0.05 | 100.0% | 0.0% | 0.0% | 0.0% | ✅ AN TOÀN |
-| **0.50 (Mặc định)** | **0.05** | **100.0%** | **0.0%** | **0.0%** | **0.0%** | **✅ TỐI ƯU KHUYẾN NGHỊ** |
-| 0.55 | 0.08 | 100.0% | 0.0% | 0.0% | 0.0% | ✅ AN TOÀN |
+| 0.40 | 0.05 | chỉ để debug | chỉ để debug | chỉ để debug |
+| 0.45 | 0.05 | chỉ để debug | chỉ để debug | chỉ để debug |
+| 0.50 | 0.05 | chỉ để debug | chỉ để debug | chỉ để debug |
+| 0.55 | 0.08 | chỉ để debug | chỉ để debug | chỉ để debug |
 
 ### 3.3 So Sánh 3 Chiến Lược Gom Cụm Danh Tính (Aggregation Strategies)
 Khi sinh viên đăng ký nhiều vector mẫu (3-5 ảnh):
@@ -141,20 +143,17 @@ Khi sinh viên đăng ký nhiều vector mẫu (3-5 ảnh):
 | **Strategy B: Centroid** | $\|e - \text{norm}(\frac{1}{N}\sum e_{ij})\|$ | 100.0% | 0.0% | 0.0% | 0.67 ms |
 | **Strategy C: Top-2 Mean** | Trung bình khoảng cách 2 mẫu gần nhất | 100.0% | 0.0% | 0.0% | 0.46 ms |
 
-### 3.4 Recognition Policy Artifact (`recognition_policy.json`)
-Cấu hình nhận diện được đóng băng thành file artifact có thể kiểm toán:
+### 3.4 Policy artifact
+Synthetic không được tạo `recognition_policy.json`. Cấu trúc policy mẫu có ở `configs/recognition_policy.example.json`; threshold production chỉ được freeze sau private validation.
 ```json
 {
-  "schema_version": 1,
-  "embedding_model": "dlib_face_recognition_resnet_v1",
-  "embedding_dim": 128,
-  "distance_metric": "euclidean_l2",
-  "distance_threshold": 0.50,
-  "identity_margin": 0.05,
-  "aggregation_strategy": "min_distance",
-  "confirmation_frames": 3,
-  "liveness_policy": "ear-blink-v1",
-  "benchmark_type": "synthetic_sanity_benchmark"
+  "schema_version": 2,
+  "policy_version": "face-policy-v1",
+  "embedding": {"model": "dlib_face_recognition_resnet_v1", "version": "1", "dimension": 128},
+  "matching": {"metric": "euclidean_l2", "aggregation": "top_k_mean", "top_k": 2},
+  "temporal": {"minimum_observations": 3, "stable_duration_ms": 500},
+  "liveness": {"mode": "ear_blink_v1"},
+  "calibrated": false
 }
 ```
 
@@ -175,6 +174,7 @@ face-attendance-system/
 │   │   ├── attendance_service.py # record_biometric_attendance, record_manual_attendance
 │   │   └── enrollment_service.py # process_student_enrollment
 │   ├── matcher.py            # Open-Set Matcher (Min distance, Centroid, Top-K aggregation)
+│   ├── policy.py             # RecognitionPolicy và policy hash dùng chung
 │   ├── liveness.py           # EAR Blink State Machine heuristic
 │   ├── recognition.py        # Single-Face Gate, Quality Gate, pHash, WebRTC Engine
 │   ├── database.py           # SQLite WAL, BEGIN IMMEDIATE, Audit Trail, Migrations
@@ -189,7 +189,9 @@ face-attendance-system/
 │   │   └── test/             # Dùng đánh giá khóa policy một lần (known & unknown)
 │   └── results/              # evaluation_report.md & recognition_policy.json
 ├── tools/
-│   ├── evaluate_matching.py  # Công cụ hiệu chuẩn threshold, margin & aggregation
+│   ├── matcher_sanity_check.py # Synthetic sanity-only, không xuất policy
+│   ├── evaluate_matching.py  # Tương thích tên cũ cho synthetic sanity check
+│   ├── evaluate_biometrics.py # Private manifest gate và real evaluation
 │   └── prepare_dataset.py    # Kiểm tra rò rỉ hash SHA-256 & pHash near-duplicate
 ├── tests/                    # Bộ kiểm thử tự động 29+ test cases
 ├── Dockerfile                # Container deployment
@@ -203,7 +205,7 @@ face-attendance-system/
 Hệ thống triển khai các cơ chế bảo vệ quyền riêng tư sinh trắc học thực tiễn:
 1. **Không lưu ảnh gốc theo mặc định**: Sau khi Quality Gate giải mã và trích xuất vector 128 chiều thành công, mảng byte ảnh gốc được giải phóng khỏi bộ nhớ, chỉ lưu vector đặc trưng.
 2. **Yêu cầu đồng ý minh bạch (Explicit Consent)**: Sinh viên bắt buộc phải đánh dấu xác nhận đồng ý xử lý dữ liệu khuôn mặt trước khi đăng ký mẫu vào hệ thống.
-3. **Quyền rút lại đồng ý (Revoke Consent)**: Giảng viên/quản trị viên có thể thu hồi dữ liệu của sinh viên (`remove_student_biometrics`), xóa sạch toàn bộ vector khuôn mặt khỏi cơ sở dữ liệu trong khi vẫn bảo lưu lịch sử điểm danh và nhật ký kiểm toán.
+3. **Quyền rút lại đồng ý (Revoke Consent)**: Giảng viên/quản trị viên có thể thu hồi dữ liệu của sinh viên (`remove_student_biometrics`), xóa sạch vector khuôn mặt, đổi consent status thành revoked và vẫn bảo lưu lịch sử điểm danh/audit.
 4. **Tự động dọn dẹp dữ liệu hết hạn (Biometric Retention)**: Hàm `purge_expired_biometrics()` tự động vô hiệu hóa các vector khuôn mặt vượt quá thời hạn lưu trữ cấu hình (`BIOMETRIC_RETENTION_DAYS`).
 5. **Kiểm soát ảnh gần trùng (Near-Duplicate Control)**: Tích hợp pHash (Perceptual Hash) phát hiện các ảnh chụp cùng một góc hoặc khung hình giống nhau để yêu cầu đa dạng hóa góc nhìn.
 6. **Timing Attack Protection**: Xác thực `X-API-Key` và mã PIN bằng `secrets.compare_digest` và PBKDF2-HMAC-SHA256 (240,000 vòng lặp).
@@ -240,7 +242,7 @@ pip install -e ".[dev]"
 ### 7.2 Khởi tạo cấu trúc & Chạy Benchmark
 ```powershell
 python tools/prepare_dataset.py
-python tools/evaluate_matching.py
+python tools/matcher_sanity_check.py
 ```
 
 ### 7.3 Chạy Web Dashboard (Streamlit)
@@ -261,7 +263,7 @@ Swagger UI tài liệu API: `http://127.0.0.1:8000/docs`
 
 1. **Canonical 9-Stage Verification Pipeline**: Thiết kế pipeline chuẩn chỉnh 9 giai đoạn bao gồm Enrollment QC, Frozen Roster Snapshot, Single-Face Gate, Open-Set Top-1/Top-2 Margin, Blink FSM, Temporal Confirmation, Decision Service, ACID Persistence và Human Review.
 2. **Clean Architecture Decoupling**: Tách rời hoàn toàn Computer Vision perception khỏi Persistence layer. `RecognitionEngine` chỉ sản sinh `RecognitionDecision` DTO, giao phó việc kiểm tra nghiệp vụ và giao dịch cho `AttendanceService`.
-3. **Transparent Evaluation & Policy Artifact**: Xây dựng công cụ hiệu chuẩn tham số 2 chiều (Distance $\times$ Margin Grid Sweep), phân tách rạch ròi giữa *Known Reject* và *Wrong Identity*, và đóng băng cấu hình thành file `recognition_policy.json`.
+3. **Evidence-based Evaluation**: Tách synthetic matcher sanity khỏi private biometric validation, enforce capture-session split và chỉ freeze `recognition_policy.json` sau khi validation/test đúng protocol.
 4. **ACID Transaction & Concurrency Control**: Xử lý 50+ request đồng thời không xung đột bằng SQLite `BEGIN IMMEDIATE` lock và snapshot danh sách môn học bất biến theo từng buổi.
 5. **Privacy-Aware Biometric Lifecycle**: Kiểm soát vòng đời sinh trắc học với kiểm tra ảnh gần trùng pHash, bắt buộc consent, tự động dọn dẹp vector hết hạn, và bảo lưu audit trail cho mọi can thiệp thủ công của con người.
 
@@ -269,4 +271,3 @@ Swagger UI tài liệu API: `http://127.0.0.1:8000/docs`
 
 ## 📄 9. Giấy Phép (License)
 Dự án được phân phối dưới giấy phép **MIT License**.
-

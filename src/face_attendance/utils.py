@@ -9,9 +9,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import math
 import re
 import secrets
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, timezone
+from datetime import time as dt_time
 
 import numpy as np
 
@@ -50,6 +52,16 @@ def display_datetime(value: str | None) -> str:
     Returns:
         str: Chuỗi ngày giờ Việt Nam thân thiện người dùng.
     """
+    if value is None:
+        return ""
+    # Pandas biểu diễn SQL NULL thành NaN; không đưa NaN vào
+    # datetime.fromisoformat vì sẽ gây lỗi khi render sinh viên vắng.
+    if not isinstance(value, str):
+        try:
+            if math.isnan(value):
+                return ""
+        except (TypeError, ValueError):
+            return ""
     if not value:
         return ""
     try:
@@ -206,4 +218,3 @@ def prepare_face_embedding(
         num_jitters=num_jitters,
     )
     return np.asarray(encodings[0], dtype=np.float64) if encodings else None
-

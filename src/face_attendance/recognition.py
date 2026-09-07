@@ -18,6 +18,7 @@ from typing import Any, Iterable
 
 import cv2
 import numpy as np
+
 try:
     from streamlit_webrtc import VideoProcessorBase
 except ImportError:
@@ -30,20 +31,24 @@ from .config import (
     BLINK_EAR_CLOSED,
     BLINK_EAR_OPEN,
     BLINK_VERIFICATION_SECONDS,
-    CONFIRMATION_FRAMES,
-    FACE_TOLERANCE,
     MAX_BRIGHTNESS,
     MAX_UPLOAD_BYTES,
     MIN_BLUR_SCORE,
     MIN_BRIGHTNESS,
     MIN_FACE_SIZE_PX,
-    MIN_IDENTITY_MARGIN,
     PROCESS_EVERY_N_FRAMES,
 )
-from .database import get_connection, save_embedding, upsert_student
-from .domain import RecognitionDecision
+from .database import (
+    get_connection,
+    get_student_by_code,
+    get_student_embeddings,
+    save_embedding,
+    upsert_student,
+)
+from .domain import BiometricConsentMissingError, RecognitionDecision
 from .liveness import BoKiemTraChopMat, ti_le_mat
 from .matcher import tim_danh_tinh_tot_nhat
+from .policy import DEFAULT_RECOGNITION_POLICY, RecognitionPolicy
 from .utils import utc_iso
 
 LOGGER = logging.getLogger(__name__)
@@ -70,6 +75,23 @@ class EnrollmentResult:
     face_width: int
     face_height: int
     phash: str | None = None
+
+
+def _check_identity_consistency(
+    results: list[EnrollmentResult],
+    policy: RecognitionPolicy,
+    context: str,
+) -> None:
+    """Chặn việc trộn ảnh của nhiều người vào cùng một hồ sơ."""
+    for index, current in enumerate(results):
+        for previous in results[:index]:
+            distance = float(np.linalg.norm(current.embedding - previous.embedding))
+            if distance > policy.distance_threshold:
+                raise ValueError(
+                    f"{context}: các ảnh hợp lệ không nhất quán danh tính "
+                    f"(khoảng cách {distance:.3f} > {policy.distance_threshold:.3f}). "
+                    "Toàn bộ đợt đăng ký đã bị từ chối."
+                )
 
 
 def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
@@ -153,8 +175,9 @@ def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
     phash_str: str | None = None
     try:
         import io
-        from PIL import Image
+
         import imagehash
+        from PIL import Image
 
         pil_img = Image.open(io.BytesIO(image_bytes))
         phash_str = str(imagehash.phash(pil_img))
@@ -177,6 +200,9 @@ def enroll_student_images(
     full_name: str,
     class_name: str,
     image_sources: Iterable[Any],
+    consent_given: bool | None = None,
+    consent_policy_version: str | None = None,
+    policy: RecognitionPolicy | None = None,
 ) -> tuple[int, list[str]]:
     """Đăng ký sinh viên và lưu các mẫu vector khuôn mặt vào cơ sở dữ liệu.
 
@@ -188,10 +214,22 @@ def enroll_student_images(
 
     Returns:
         tuple[int, list[str]]: (Số ảnh đã lưu thành công, Danh sách cảnh báo/lỗi nếu có).
+
+    ``consent_given=None`` chỉ được giữ cho các tool seed/compatibility cũ.
+    Luồng người dùng và application service luôn truyền ``True`` hoặc ``False``;
+    không gọi trực tiếp hàm thấp hơn để bỏ qua consent.
     """
+    selected_policy = policy or DEFAULT_RECOGNITION_POLICY
+    if consent_given is False:
+        raise BiometricConsentMissingError(
+            "Cần có consent rõ ràng trước khi giải mã hoặc xử lý ảnh khuôn mặt."
+        )
+
     sources = list(image_sources)
     if not sources:
         raise ValueError("Hãy tải ảnh lên hoặc chụp ít nhất một ảnh.")
+    if consent_given is True and len(sources) < 5:
+        raise ValueError("Đăng ký chính thức yêu cầu đúng tối thiểu 5 ảnh hợp lệ.")
 
     # Chỉ tạo/cập nhật sinh viên sau khi đã có ít nhất một ảnh hợp lệ.
     validated: list[tuple[str, EnrollmentResult]] = []
@@ -208,9 +246,8 @@ def enroll_student_images(
         raise ValueError("Không có ảnh hợp lệ. " + " | ".join(errors))
 
     # Kiểm tra near-duplicate giữa các ảnh trong cùng đợt tải lên
-    near_dup_count = 0
     valid_unique: list[tuple[str, EnrollmentResult]] = []
-    for i, (name_i, res_i) in enumerate(validated):
+    for name_i, res_i in validated:
         is_near_dup = False
         for name_prev, res_prev in valid_unique:
             if res_i.image_hash == res_prev.image_hash:
@@ -234,13 +271,72 @@ def enroll_student_images(
                     pass
         if not is_near_dup:
             valid_unique.append((name_i, res_i))
-        else:
-            near_dup_count += 1
 
     if not valid_unique:
         raise ValueError("Tất cả ảnh tải lên đều bị trùng lặp hoặc near-duplicate. " + " | ".join(errors))
 
-    student = upsert_student(student_code, full_name, class_name)
+    if consent_given is True and len(valid_unique) < 5:
+        raise ValueError(
+            "Đợt đăng ký phải còn tối thiểu 5 ảnh khác nhau sau kiểm tra chất lượng và trùng lặp."
+        )
+
+    # Kiểm tra consistency trước khi tạo/cập nhật student để không tạo profile
+    # dở dang khi batch ảnh chứa nhiều danh tính.
+    _check_identity_consistency(
+        [result for _, result in valid_unique],
+        selected_policy,
+        "Enrollment mới",
+    )
+
+    if consent_given is True:
+        existing_student = get_student_by_code(student_code)
+        if existing_student is not None:
+            with get_connection() as connection:
+                incompatible = connection.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM face_embeddings
+                    WHERE student_id = ?
+                      AND revoked_at_utc IS NULL
+                      AND (
+                          embedding_dim != ?
+                          OR embedding_model != ?
+                          OR embedding_model_version != ?
+                      )
+                    """,
+                    (
+                        int(existing_student["id"]),
+                        selected_policy.embedding_dimension,
+                        selected_policy.embedding_model,
+                        selected_policy.embedding_model_version,
+                    ),
+                ).fetchone()["total"]
+            if incompatible:
+                raise ValueError(
+                    "Profile biometric hiện tại dùng model/version khác; "
+                    "hãy thu hồi và đăng ký lại thay vì trộn hai vector space."
+                )
+            existing_embeddings = get_student_embeddings(int(existing_student["id"]), selected_policy)
+            for _, result in valid_unique:
+                if existing_embeddings:
+                    nearest = min(
+                        float(np.linalg.norm(result.embedding - old_embedding))
+                        for old_embedding in existing_embeddings
+                    )
+                    if nearest > selected_policy.distance_threshold:
+                        raise ValueError(
+                            "Ảnh mới không nhất quán với profile biometric hiện tại "
+                            f"(khoảng cách gần nhất {nearest:.3f} > "
+                            f"{selected_policy.distance_threshold:.3f})."
+                        )
+
+    student = upsert_student(
+        student_code,
+        full_name,
+        class_name,
+        consent_given=consent_given,
+        consent_policy_version=consent_policy_version or selected_policy.policy_version,
+    )
     saved = 0
     duplicates = 0
     for _, result in valid_unique:
@@ -252,6 +348,8 @@ def enroll_student_images(
             result.brightness,
             result.face_width,
             result.face_height,
+            policy=selected_policy,
+            phash=result.phash,
         ):
             saved += 1
         else:
@@ -273,7 +371,10 @@ class FaceTemplate:
     embedding: np.ndarray
 
 
-def load_templates(session_id: int | None = None) -> list[FaceTemplate]:
+def load_templates(
+    session_id: int | None = None,
+    policy: RecognitionPolicy | None = None,
+) -> list[FaceTemplate]:
     """Tải danh sách các mẫu khuôn mặt (FaceTemplate) active từ cơ sở dữ liệu.
 
     Tùy chọn lọc theo `session_id` để chỉ tải các sinh viên thuộc danh sách môn học của buổi đó.
@@ -284,20 +385,61 @@ def load_templates(session_id: int | None = None) -> list[FaceTemplate]:
     Returns:
         list[FaceTemplate]: Danh sách mẫu tham chiếu.
     """
+    selected_policy = policy or DEFAULT_RECOGNITION_POLICY
+    mismatch_query = """
+        SELECT COUNT(*) AS total
+        FROM face_embeddings fe
+        JOIN students s ON s.id = fe.student_id
+    """
+    mismatch_conditions = [
+        "s.active = 1",
+        "s.consent_status = 'granted'",
+        "fe.revoked_at_utc IS NULL",
+        "(fe.embedding_dim != ? OR fe.embedding_model != ? OR fe.embedding_model_version != ?)",
+    ]
+    mismatch_params: tuple[Any, ...] = (
+        selected_policy.embedding_dimension,
+        selected_policy.embedding_model,
+        selected_policy.embedding_model_version,
+    )
+    if session_id is not None:
+        mismatch_query += " JOIN session_enrollments se ON se.student_id = s.id"
+        mismatch_conditions.append("se.session_id = ?")
+        mismatch_params += (session_id,)
+    mismatch_query += " WHERE " + " AND ".join(mismatch_conditions)
+    with get_connection() as connection:
+        mismatch_count = int(connection.execute(mismatch_query, mismatch_params).fetchone()["total"])
+    if mismatch_count:
+        raise RuntimeError(
+            "Gallery chứa embedding không tương thích với recognition policy; "
+            "cần re-enrollment thay vì trộn khác model/version."
+        )
+
     query = """
     SELECT s.id AS student_id, s.student_code, s.full_name, fe.embedding
     FROM face_embeddings fe
     JOIN students s ON s.id = fe.student_id
     """
-    params: tuple[Any, ...] = ()
+    conditions = [
+        "s.active = 1",
+        "s.consent_status = 'granted'",
+        "fe.revoked_at_utc IS NULL",
+        "fe.embedding_dim = ?",
+        "fe.embedding_model = ?",
+        "fe.embedding_model_version = ?",
+    ]
+    params: tuple[Any, ...] = (
+        selected_policy.embedding_dimension,
+        selected_policy.embedding_model,
+        selected_policy.embedding_model_version,
+    )
     if session_id is not None:
         query += """
         JOIN session_enrollments se ON se.student_id = s.id
-        WHERE s.active = 1 AND se.session_id = ?
         """
-        params = (session_id,)
-    else:
-        query += " WHERE s.active = 1"
+        conditions.append("se.session_id = ?")
+        params += (session_id,)
+    query += " WHERE " + " AND ".join(conditions)
     query += """
     ORDER BY s.student_code, fe.id
     """
@@ -306,7 +448,7 @@ def load_templates(session_id: int | None = None) -> list[FaceTemplate]:
         rows = connection.execute(query, params).fetchall()
     for row in rows:
         embedding = np.frombuffer(row["embedding"], dtype=np.float64).copy()
-        if embedding.shape == (128,):
+        if embedding.shape == (selected_policy.embedding_dimension,):
             templates.append(
                 FaceTemplate(
                     student_id=int(row["student_id"]),
@@ -336,7 +478,10 @@ class RecognitionEngine:
         session_id: int,
         require_blink: bool,
         attendance_service: Any = None,
+        policy: RecognitionPolicy | None = None,
     ) -> None:
+        self.session_id = session_id
+        self.policy = policy or DEFAULT_RECOGNITION_POLICY
         if attendance_service is None:
             from .application.attendance_service import record_biometric_attendance
 
@@ -344,9 +489,10 @@ class RecognitionEngine:
         else:
             self.attendance_service = attendance_service
         self.require_blink = require_blink
-        self.templates = load_templates(session_id)
+        self.templates = load_templates(session_id, self.policy)
         self.frame_number = 0
         self.confirm_counts: dict[int, int] = {}
+        self.tracking_started_at: float | None = None
         self.current_tracking_student_id: int | None = None
         self.blink_checker = BoKiemTraChopMat(
             BLINK_EAR_CLOSED, BLINK_EAR_OPEN, BLINK_VERIFICATION_SECONDS
@@ -381,7 +527,12 @@ class RecognitionEngine:
         if not self.templates:
             return None, float("inf"), float("inf"), float("inf")
         result = tim_danh_tinh_tot_nhat(
-            encoding, self.templates, FACE_TOLERANCE, MIN_IDENTITY_MARGIN
+            encoding,
+            self.templates,
+            self.policy.distance_threshold,
+            self.policy.identity_margin,
+            strategy=self.policy.aggregation_strategy,
+            top_k=self.policy.top_k,
         )
         return result.mau, result.khoang_cach, result.khoang_cach_thu_hai, result.do_phan_biet
 
@@ -437,6 +588,7 @@ class RecognitionEngine:
         if num_faces == 0:
             self.current_tracking_student_id = None
             self.confirm_counts.clear()
+            self.tracking_started_at = None
             self.last_annotations = []
             self.set_event("info", "Đang chờ khuôn mặt...")
             return self.draw_annotations(image_bgr)
@@ -445,6 +597,7 @@ class RecognitionEngine:
         if num_faces > 1:
             self.current_tracking_student_id = None
             self.confirm_counts.clear()
+            self.tracking_started_at = None
             warning_annotations = []
             for top, right, bottom, left in locations:
                 warning_annotations.append(
@@ -485,6 +638,7 @@ class RecognitionEngine:
             if self.current_tracking_student_id != template.student_id:
                 self.current_tracking_student_id = template.student_id
                 self.confirm_counts[template.student_id] = 0
+                self.tracking_started_at = time.monotonic()
                 self.blink_checker.dat_lai(template.student_id)
 
             live = self.update_blink(template.student_id, landmarks)
@@ -493,10 +647,12 @@ class RecognitionEngine:
                     self.confirm_counts.get(template.student_id, 0) + 1
                 )
             else:
+                # Liveness chưa hợp lệ thì không cộng dồn temporal evidence.
                 self.confirm_counts[template.student_id] = 0
         else:
             self.current_tracking_student_id = None
             self.confirm_counts.clear()
+            self.tracking_started_at = None
             live = False
 
         top, right, bottom, left = location
@@ -509,13 +665,20 @@ class RecognitionEngine:
             self.set_event("warning", "Khuôn mặt chưa được đăng ký trong danh sách buổi học.")
         else:
             count = self.confirm_counts.get(template.student_id, 0)
+            stable_ms = int(
+                max(0.0, time.monotonic() - (self.tracking_started_at or time.monotonic()))
+                * 1000
+            )
             if not live:
                 color = (0, 215, 255)  # Vàng: Cần chớp mắt
                 label = f"{template.student_code} - CHỚP MẮT"
                 self.set_event("warning", f"{template.student_code}: Hãy chớp mắt một lần.")
-            elif count < CONFIRMATION_FRAMES:
+            elif count < self.policy.minimum_observations or stable_ms < self.policy.stable_duration_ms:
                 color = (0, 215, 255)  # Vàng: Đang xác nhận giữ yên
-                label = f"{template.student_code} - GIỮ YÊN {count}/{CONFIRMATION_FRAMES}"
+                label = (
+                    f"{template.student_code} - GIỮ YÊN "
+                    f"{count}/{self.policy.minimum_observations}, {stable_ms}ms"
+                )
             else:
                 color = (0, 255, 0)  # Xanh lá: Khớp thành công
                 label = f"{template.student_code} - KHỚP {distance:.3f} (Δ={margin:.3f})"
@@ -532,10 +695,23 @@ class RecognitionEngine:
                         margin=margin,
                         liveness_passed=True,
                         confirmation_frames=count,
-                        policy_version="face-policy-v1",
+                        policy_version=self.policy.policy_version,
                         timestamp_utc=utc_iso(),
+                        distance_threshold=self.policy.distance_threshold,
+                        margin_threshold=self.policy.identity_margin,
+                        aggregation_strategy=self.policy.aggregation_strategy,
+                        embedding_model=self.policy.embedding_model,
+                        embedding_model_version=self.policy.embedding_model_version,
+                        stable_duration_ms=stable_ms,
+                        liveness_policy=self.policy.liveness_policy,
+                        recognition_policy_hash=self.policy.policy_hash,
                     )
                     self.last_attempt[template.student_id] = now_mono
+                    # Mỗi lần gửi decision là một attendance attempt mới. Không
+                    # cho phép lần sau dùng lại bằng chứng blink của attempt này.
+                    self.blink_checker.dat_lai(template.student_id)
+                    self.confirm_counts[template.student_id] = 0
+                    self.tracking_started_at = None
                     try:
                         res = self.attendance_service(self.session_id, decision)
                         status_label = "CÓ MẶT" if res.status == "present" else "ĐI TRỄ"

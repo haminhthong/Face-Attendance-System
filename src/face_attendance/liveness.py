@@ -1,7 +1,7 @@
-"""Module kiểm tra người thật (Anti-Spoofing / Blink Liveness Detection).
+"""Module kiểm tra tương tác chớp mắt cơ bản (Basic Blink Challenge).
 
-Sử dụng tỉ lệ đặc trưng của mắt (Eye Aspect Ratio - EAR) dựa trên 6 mốc khuôn mặt (facial landmarks)
-và máy trạng thái 4 bước: [Mở mắt] -> [Nhắm mắt] -> [Mở mắt lại] -> [Xác minh thành công (có TTL)].
+Sử dụng tỉ lệ đặc trưng của mắt (Eye Aspect Ratio - EAR) dựa trên 6 mốc khuôn mặt
+và máy trạng thái 4 bước. Cơ chế này không chống được replay video/deepfake/PAD.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..database import manual_attendance_correction, mark_attendance
+from ..database import log_recognition_attempt, manual_attendance_correction, mark_attendance
 from ..domain import (
     AttendanceResult,
     DuplicateAttendanceError,
@@ -13,13 +13,14 @@ from ..domain import (
     build_accepted_result,
     build_rejected_result,
 )
+from ..policy import DEFAULT_RECOGNITION_POLICY
 from ..utils import utc_iso
 
 
 def record_biometric_attendance(
     session_id: int,
     decision: RecognitionDecision,
-    tolerance: float = 0.50,
+    tolerance: float | None = None,
 ) -> AttendanceResult:
     """Xử lý quyết định nhận diện từ Vision Pipeline và thực hiện giao dịch ghi nhận điểm danh.
 
@@ -27,30 +28,96 @@ def record_biometric_attendance(
     Lưu trữ đầy đủ bằng chứng nhận diện (distance, margin, liveness, policy version) phục vụ kiểm toán.
     """
     now_str = utc_iso()
+    # Không lấy lại threshold từ config khác. Evidence trong decision là policy
+    # đã được matcher dùng và phải là nguồn duy nhất cho transaction này.
+    effective_tolerance = decision.distance_threshold
     if not decision.liveness_passed:
+        log_recognition_attempt(
+            session_id,
+            "rejected",
+            decision.policy_version,
+            rejection_reason=RejectionReason.LIVENESS_FAILED.value,
+            candidate_student_id=decision.student_id,
+            distance=decision.distance,
+            margin=decision.margin,
+            stable_duration_ms=decision.stable_duration_ms,
+        )
         return build_rejected_result(
             reason=RejectionReason.LIVENESS_FAILED,
             recognized_at=now_str,
             student_id=str(decision.student_id),
             distance=decision.distance,
             liveness_passed=False,
-            tolerance=tolerance,
+            tolerance=effective_tolerance,
             margin=decision.margin,
             source="face_webrtc",
             policy_version=decision.policy_version,
+            distance_threshold=effective_tolerance,
+            margin_threshold=decision.margin_threshold,
+            aggregation_strategy=decision.aggregation_strategy,
+            embedding_model_version=decision.embedding_model_version,
+            stable_duration_ms=decision.stable_duration_ms,
+            recognition_policy_hash=decision.recognition_policy_hash,
         )
 
-    if decision.distance > tolerance:
+    if decision.margin < decision.margin_threshold:
+        log_recognition_attempt(
+            session_id,
+            "rejected",
+            decision.policy_version,
+            rejection_reason=RejectionReason.AMBIGUOUS_MATCH.value,
+            candidate_student_id=decision.student_id,
+            distance=decision.distance,
+            margin=decision.margin,
+            liveness_passed=True,
+            stable_duration_ms=decision.stable_duration_ms,
+        )
+        return build_rejected_result(
+            reason=RejectionReason.AMBIGUOUS_MATCH,
+            recognized_at=now_str,
+            student_id=str(decision.student_id),
+            distance=decision.distance,
+            liveness_passed=True,
+            tolerance=effective_tolerance,
+            margin=decision.margin,
+            source="face_webrtc",
+            policy_version=decision.policy_version,
+            distance_threshold=effective_tolerance,
+            margin_threshold=decision.margin_threshold,
+            aggregation_strategy=decision.aggregation_strategy,
+            embedding_model_version=decision.embedding_model_version,
+            stable_duration_ms=decision.stable_duration_ms,
+            recognition_policy_hash=decision.recognition_policy_hash,
+        )
+
+    if decision.distance > effective_tolerance:
+        log_recognition_attempt(
+            session_id,
+            "rejected",
+            decision.policy_version,
+            rejection_reason=RejectionReason.UNKNOWN_FACE.value,
+            candidate_student_id=decision.student_id,
+            distance=decision.distance,
+            margin=decision.margin,
+            liveness_passed=True,
+            stable_duration_ms=decision.stable_duration_ms,
+        )
         return build_rejected_result(
             reason=RejectionReason.UNKNOWN_FACE,
             recognized_at=now_str,
             student_id=str(decision.student_id),
             distance=decision.distance,
             liveness_passed=True,
-            tolerance=tolerance,
+            tolerance=effective_tolerance,
             margin=decision.margin,
             source="face_webrtc",
             policy_version=decision.policy_version,
+            distance_threshold=effective_tolerance,
+            margin_threshold=decision.margin_threshold,
+            aggregation_strategy=decision.aggregation_strategy,
+            embedding_model_version=decision.embedding_model_version,
+            stable_duration_ms=decision.stable_duration_ms,
+            recognition_policy_hash=decision.recognition_policy_hash,
         )
 
     result_code, message = mark_attendance(
@@ -58,15 +125,29 @@ def record_biometric_attendance(
         student_id=decision.student_id,
         distance=decision.distance,
         identity_margin=decision.margin,
-        margin_threshold=0.05,
-        liveness_policy="ear_blink_v1",
+        margin_threshold=decision.margin_threshold,
+        liveness_policy=decision.liveness_policy,
         policy_version=decision.policy_version,
         confirmation_frames=decision.confirmation_frames,
+        stable_duration_ms=decision.stable_duration_ms,
+        aggregation_strategy=decision.aggregation_strategy,
+        embedding_model_version=decision.embedding_model_version,
+        recognition_policy_hash=decision.recognition_policy_hash,
         source="face_webrtc",
-        tolerance=tolerance,
+        tolerance=effective_tolerance,
     )
 
     if result_code == "created":
+        log_recognition_attempt(
+            session_id,
+            "accepted",
+            decision.policy_version,
+            candidate_student_id=decision.student_id,
+            distance=decision.distance,
+            margin=decision.margin,
+            liveness_passed=True,
+            stable_duration_ms=decision.stable_duration_ms,
+        )
         status = "late" if "ĐI TRỄ" in message else "present"
         return build_accepted_result(
             student_id=str(decision.student_id),
@@ -74,10 +155,16 @@ def record_biometric_attendance(
             distance=decision.distance,
             liveness_passed=True,
             recognized_at=now_str,
-            tolerance=tolerance,
+            tolerance=effective_tolerance,
             margin=decision.margin,
             source="face_webrtc",
             policy_version=decision.policy_version,
+            distance_threshold=effective_tolerance,
+            margin_threshold=decision.margin_threshold,
+            aggregation_strategy=decision.aggregation_strategy,
+            embedding_model_version=decision.embedding_model_version,
+            stable_duration_ms=decision.stable_duration_ms,
+            recognition_policy_hash=decision.recognition_policy_hash,
         )
     elif result_code == "already":
         raise DuplicateAttendanceError(message)
@@ -92,10 +179,16 @@ def record_biometric_attendance(
             student_id=str(decision.student_id),
             distance=decision.distance,
             liveness_passed=True,
-            tolerance=tolerance,
+            tolerance=effective_tolerance,
             margin=decision.margin,
             source="face_webrtc",
             policy_version=decision.policy_version,
+            distance_threshold=effective_tolerance,
+            margin_threshold=decision.margin_threshold,
+            aggregation_strategy=decision.aggregation_strategy,
+            embedding_model_version=decision.embedding_model_version,
+            stable_duration_ms=decision.stable_duration_ms,
+            recognition_policy_hash=decision.recognition_policy_hash,
         )
 
 
@@ -124,9 +217,10 @@ def record_manual_attendance(
         distance=0.0,
         liveness_passed=False,  # Điểm danh thủ công không giả lập liveness AI
         recognized_at=now_str,
-        tolerance=0.50,
+        tolerance=DEFAULT_RECOGNITION_POLICY.distance_threshold,
         margin=None,
         source="manual",
+        policy_version="manual",
     )
 
 
@@ -134,9 +228,9 @@ def process_attendance_record(
     session_id: int,
     student_id: int,
     distance: float,
-    tolerance: float = 0.50,
+    tolerance: float = DEFAULT_RECOGNITION_POLICY.distance_threshold,
     liveness_passed: bool = True,
-    margin: float = 0.05,
+    margin: float = DEFAULT_RECOGNITION_POLICY.identity_margin,
     source: str = "face_webrtc",
 ) -> AttendanceResult:
     """Xử lý yêu cầu điểm danh cho sinh viên và trả về kết quả cấu trúc chuẩn hóa.
@@ -159,6 +253,24 @@ def process_attendance_record(
         StudentNotInRosterError: Nếu sinh viên không thuộc danh sách lớp của buổi học.
     """
     now_str = utc_iso()
+    if margin < DEFAULT_RECOGNITION_POLICY.identity_margin:
+        return build_rejected_result(
+            reason=RejectionReason.AMBIGUOUS_MATCH,
+            recognized_at=now_str,
+            student_id=str(student_id),
+            distance=distance,
+            liveness_passed=liveness_passed,
+            tolerance=tolerance,
+            margin=margin,
+            source=source,
+            policy_version=DEFAULT_RECOGNITION_POLICY.policy_version,
+            distance_threshold=tolerance,
+            margin_threshold=DEFAULT_RECOGNITION_POLICY.identity_margin,
+            aggregation_strategy=DEFAULT_RECOGNITION_POLICY.aggregation_strategy,
+            embedding_model_version=DEFAULT_RECOGNITION_POLICY.embedding_model_version,
+            stable_duration_ms=0,
+            recognition_policy_hash=DEFAULT_RECOGNITION_POLICY.policy_hash,
+        )
     result_code, message = mark_attendance(
         session_id=session_id,
         student_id=student_id,
@@ -196,4 +308,3 @@ def process_attendance_record(
             margin=margin,
             source=source,
         )
-

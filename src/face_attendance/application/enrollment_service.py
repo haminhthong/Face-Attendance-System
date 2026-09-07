@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from ..recognition import enroll_student_images
 from ..utils import normalize_person_name, normalize_student_code
 
 
@@ -13,6 +12,8 @@ def process_student_enrollment(
     full_name: str,
     class_name: str,
     image_sources: Iterable[Any],
+    consent_given: bool = False,
+    consent_policy_version: str = "biometric-consent-v1",
 ) -> tuple[int, list[str]]:
     """Chuẩn hóa dữ liệu đầu vào và đăng ký sinh viên kèm ảnh mẫu.
 
@@ -25,13 +26,24 @@ def process_student_enrollment(
     Returns:
         tuple[int, list[str]]: (Số ảnh mẫu đã đăng ký thành công, Cảnh báo/lỗi nếu có).
     """
+    if not consent_given:
+        raise ValueError(
+            "Cần consent rõ ràng trước khi giải mã hoặc xử lý ảnh khuôn mặt."
+        )
+
     clean_code = normalize_student_code(student_code)
     clean_name = normalize_person_name(full_name)
     clean_class = class_name.strip()
+
+    # Import trễ để API/attendance service không bắt buộc cài OpenCV nếu chỉ
+    # chạy các nghiệp vụ database hoặc backend không dùng camera.
+    from ..recognition import enroll_student_images
 
     return enroll_student_images(
         student_code=clean_code,
         full_name=clean_name,
         class_name=clean_class,
         image_sources=image_sources,
+        consent_given=True,
+        consent_policy_version=consent_policy_version,
     )
