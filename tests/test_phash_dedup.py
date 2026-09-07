@@ -1,20 +1,19 @@
 """Unit tests cho cơ chế phát hiện ảnh gần trùng (near-duplicate) bằng Perceptual Hash (pHash)."""
 
-import io
-from pathlib import Path
 import sys
 from unittest.mock import MagicMock, patch
+
 import cv2
 import numpy as np
 from PIL import Image
-import pytest
 
 # Đảm bảo face_recognition có trong sys.modules để mock trên môi trường không có dlib binary
 if "face_recognition" not in sys.modules:
     sys.modules["face_recognition"] = MagicMock()
 
-from face_attendance.recognition import decode_and_validate_face, enroll_student_images
 from tools import prepare_dataset
+
+from face_attendance.recognition import decode_and_validate_face, enroll_student_images
 
 
 class MockUpload:
@@ -41,8 +40,10 @@ def test_phash_present_in_enrollment_result() -> None:
     fake_locations = [(50, 250, 250, 50)]
     fake_encodings = [np.zeros(128)]
 
-    with patch("face_recognition.face_locations", return_value=fake_locations), \
-         patch("face_recognition.face_encodings", return_value=fake_encodings):
+    with (
+        patch("face_recognition.face_locations", return_value=fake_locations),
+        patch("face_recognition.face_encodings", return_value=fake_encodings),
+    ):
         result = decode_and_validate_face(img_bytes)
 
     assert result.phash is not None
@@ -59,10 +60,12 @@ def test_enroll_student_images_filters_near_duplicates() -> None:
     fake_locations = [(50, 250, 250, 50)]
     fake_encodings = [np.zeros(128)]
 
-    with patch("face_recognition.face_locations", return_value=fake_locations), \
-         patch("face_recognition.face_encodings", return_value=fake_encodings), \
-         patch("face_attendance.recognition.upsert_student", return_value={"id": 1}), \
-         patch("face_attendance.recognition.save_embedding", return_value=True):
+    with (
+        patch("face_recognition.face_locations", return_value=fake_locations),
+        patch("face_recognition.face_encodings", return_value=fake_encodings),
+        patch("face_attendance.recognition.upsert_student", return_value={"id": 1}),
+        patch("face_attendance.recognition.save_embedding", return_value=True),
+    ):
         saved, warnings = enroll_student_images("SV001", "Nguyễn Văn A", "K23", [up1, up2])
 
     # Chỉ 1 ảnh được lưu, ảnh thứ 2 bị bỏ qua do trùng byte / near-duplicate

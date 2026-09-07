@@ -106,6 +106,7 @@ def render_admin_auth() -> bool:
                 st.error(f"PIN không đúng. Còn {5 - failed_attempts} lần thử.")
     return False
 
+
 def render_attendance_page() -> None:
     st.header("Điểm danh trực tiếp")
     open_sessions = list_sessions("open")
@@ -167,6 +168,7 @@ def render_attendance_page() -> None:
 
     live_status_panel()
 
+
 def render_student_management() -> None:
     st.subheader("Đăng ký khuôn mặt sinh viên")
     st.info(
@@ -182,9 +184,7 @@ def render_student_management() -> None:
         accept_multiple_files=True,
     )
     captured = st.camera_input("Hoặc chụp một ảnh từ camera", resolution="720p")
-    consent = st.checkbox(
-        "Đã có sự đồng ý của sinh viên về việc xử lý dữ liệu khuôn mặt"
-    )
+    consent = st.checkbox("Đã có sự đồng ý của sinh viên về việc xử lý dữ liệu khuôn mặt")
     if st.button("Đăng ký/Cập nhật sinh viên", type="primary"):
         if not consent:
             st.error("Cần xác nhận sự đồng ý trước khi đăng ký.")
@@ -217,8 +217,7 @@ def render_student_management() -> None:
     )
     if not students.empty:
         option_map = {
-            f"{row['MSSV']} - {row['Họ tên']}": int(row["id"])
-            for _, row in students.iterrows()
+            f"{row['MSSV']} - {row['Họ tên']}": int(row["id"]) for _, row in students.iterrows()
         }
         selected_label = st.selectbox("Chọn sinh viên cần thu hồi dữ liệu", list(option_map))
         confirm_delete = st.checkbox(
@@ -228,6 +227,7 @@ def render_student_management() -> None:
             remove_student_biometrics(option_map[selected_label])
             st.success("Đã thu hồi dữ liệu khuôn mặt.")
             st.rerun()
+
 
 def render_course_session_management() -> None:
     st.subheader("Môn học")
@@ -255,8 +255,7 @@ def render_course_session_management() -> None:
     st.divider()
     st.subheader("Danh sách sinh viên theo môn học")
     roster_course_map = {
-        f"{row['course_code']} - {row['course_name']}": int(row["id"])
-        for row in courses
+        f"{row['course_code']} - {row['course_name']}": int(row["id"]) for row in courses
     }
     roster_course_label = st.selectbox(
         "Chọn môn học để xếp danh sách", list(roster_course_map), key="roster_course"
@@ -290,10 +289,7 @@ def render_course_session_management() -> None:
 
     st.divider()
     st.subheader("Tạo buổi học")
-    course_map = {
-        f"{row['course_code']} - {row['course_name']}": int(row["id"])
-        for row in courses
-    }
+    course_map = {f"{row['course_code']} - {row['course_name']}": int(row["id"]) for row in courses}
     with st.form("create_session"):
         selected_course = st.selectbox("Môn học", list(course_map))
         session_name = st.text_input("Tên buổi học", placeholder="Buổi 01")
@@ -345,6 +341,7 @@ def render_course_session_management() -> None:
             except (ValueError, sqlite3.Error) as exc:
                 st.error(str(exc))
 
+
 def render_reports() -> None:
     st.subheader("Báo cáo điểm danh")
     sessions = list_sessions()
@@ -389,13 +386,17 @@ def render_reports() -> None:
             ).fetchall()
 
         if roster_rows:
-            student_map = {f"{r['student_code']} - {r['full_name']}": int(r["id"]) for r in roster_rows}
+            student_map = {
+                f"{r['student_code']} - {r['full_name']}": int(r["id"]) for r in roster_rows
+            }
             with st.form("manual_correction_form"):
                 sel_student = st.selectbox("Chọn sinh viên cần điều chỉnh", list(student_map))
                 sel_status = st.selectbox(
                     "Trạng thái mới",
                     ["present", "late", "absent"],
-                    format_func=lambda s: {"present": "Có mặt", "late": "Đi trễ", "absent": "Vắng"}[s],
+                    format_func=lambda s: {"present": "Có mặt", "late": "Đi trễ", "absent": "Vắng"}[
+                        s
+                    ],
                 )
                 lecturer_name = st.text_input("Giảng viên phê duyệt", value="Giảng viên phụ trách")
                 reason = st.text_input(
@@ -446,6 +447,7 @@ def render_security_settings() -> None:
         "Dữ liệu được lưu tại SQLite; ảnh gốc không được lưu. Khi triển khai thật, "
         "hãy đặt thư mục dữ liệu trên ổ đĩa bền vững, giới hạn quyền truy cập và sao lưu định kỳ."
     )
+
 
 def render_admin_page() -> None:
     st.header("Khu vực quản trị")

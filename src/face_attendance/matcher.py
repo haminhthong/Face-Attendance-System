@@ -118,9 +118,7 @@ def tim_danh_tinh_tot_nhat(
             if centroid_norm <= 1e-9 or query_norm <= 1e-9:
                 rep_distance = float(np.linalg.norm(centroid - vector))
             else:
-                rep_distance = float(
-                    np.linalg.norm(centroid / centroid_norm - vector / query_norm)
-                )
+                rep_distance = float(np.linalg.norm(centroid / centroid_norm - vector / query_norm))
         elif strat == AggregationStrategy.TOP_K_MEAN:
             k = max(1, min(top_k, len(mau_list)))
             rep_distance = float(np.mean([d for d, _ in mau_list[:k]]))
@@ -144,10 +142,7 @@ def tim_danh_tinh_tot_nhat(
     # Kiểm tra điều kiện từ chối người lạ / mơ hồ danh tính
     # 1. Khoảng cách tốt nhất phải <= nguong_khoang_cach
     # 2. Độ chênh lệch giữa ứng viên #1 và ứng viên #2 phải >= nguong_phan_biet
-    if (
-        khoang_cach_tot_nhat > nguong_khoang_cach
-        or do_phan_biet < nguong_phan_biet
-    ):
+    if khoang_cach_tot_nhat > nguong_khoang_cach or do_phan_biet < nguong_phan_biet:
         ket_qua_mau = None
     else:
         ket_qua_mau = mau_tot_nhat

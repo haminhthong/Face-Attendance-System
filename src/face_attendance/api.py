@@ -73,7 +73,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 class YeuCauDiemDanh(BaseModel):
-    """Schema Pydantic đại diện cho yêu cầu ghi nhận điểm danh thông thường (legacy client)."""
+    """Schema Pydantic cho yêu cầu điểm danh tương thích với client cũ."""
 
     session_id: int = Field(gt=0, description="ID của buổi học đang mở điểm danh")
     student_id: int = Field(gt=0, description="ID sinh viên được nhận diện")
@@ -93,8 +93,12 @@ class YeuCauDiemDanhBiometric(BaseModel):
     second_distance: float = Field(default=2.0, description="Khoảng cách ứng viên Top-2")
     margin: float = Field(ge=0.0, description="Chênh lệch giữa Top-1 và Top-2 (Margin)")
     liveness_passed: bool = Field(description="Bằng chứng kiểm tra liveness thành công")
-    confirmation_frames: int = Field(default=3, ge=1, description="Số khung hình nhận diện liên tiếp hợp lệ")
-    policy_version: str = Field(default=RECOGNITION_POLICY.policy_version, description="Phiên bản chính sách")
+    confirmation_frames: int = Field(
+        default=3, ge=1, description="Số khung hình nhận diện liên tiếp hợp lệ"
+    )
+    policy_version: str = Field(
+        default=RECOGNITION_POLICY.policy_version, description="Phiên bản chính sách"
+    )
     distance_threshold: float = Field(default=RECOGNITION_POLICY.distance_threshold, ge=0.0, le=2.0)
     margin_threshold: float = Field(default=RECOGNITION_POLICY.identity_margin, ge=0.0, le=2.0)
     aggregation_strategy: str = Field(default=RECOGNITION_POLICY.aggregation_strategy)
@@ -211,16 +215,16 @@ def attendance(
 )
 def attendance_biometric(request: YeuCauDiemDanhBiometric) -> dict[str, Any]:
     """Nhận RecognitionDecision đầy đủ từ vision pipeline và thực hiện ghi nhận."""
-    policy_matches = (
-        request.policy_version == RECOGNITION_POLICY.policy_version
-        and request.distance_threshold == RECOGNITION_POLICY.distance_threshold
-        and request.margin_threshold == RECOGNITION_POLICY.identity_margin
-        and request.aggregation_strategy == RECOGNITION_POLICY.aggregation_strategy
-        and request.embedding_model == RECOGNITION_POLICY.embedding_model
-        and request.embedding_model_version == RECOGNITION_POLICY.embedding_model_version
-        and request.stable_duration_ms == RECOGNITION_POLICY.stable_duration_ms
-        and request.liveness_policy == RECOGNITION_POLICY.liveness_policy
-        and request.recognition_policy_hash == RECOGNITION_POLICY.policy_hash
+    policy_matches = RECOGNITION_POLICY.matches_evidence(
+        policy_version=request.policy_version,
+        distance_threshold=request.distance_threshold,
+        margin_threshold=request.margin_threshold,
+        aggregation_strategy=request.aggregation_strategy,
+        embedding_model=request.embedding_model,
+        embedding_model_version=request.embedding_model_version,
+        stable_duration_ms=request.stable_duration_ms,
+        liveness_policy=request.liveness_policy,
+        recognition_policy_hash=request.recognition_policy_hash,
     )
     if not policy_matches:
         raise HTTPException(
@@ -281,4 +285,6 @@ def attendance_manual(request: YeuCauDiemDanhManual) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi điều chỉnh điểm danh: {exc}") from None
+        raise HTTPException(
+            status_code=500, detail=f"Lỗi khi điều chỉnh điểm danh: {exc}"
+        ) from None

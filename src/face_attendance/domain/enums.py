@@ -34,6 +34,7 @@ class RejectionReason(str, Enum):
     NOT_IN_ROSTER = "not_in_roster"
     NO_CONSENT = "no_consent"
     UNSTABLE_TRACKING = "unstable_tracking"
+    POLICY_MISMATCH = "policy_mismatch"
 
 
 class ConfidenceLevel(str, Enum):
@@ -76,4 +77,3 @@ def get_confidence_level(distance: float | None, tolerance: float = 0.50) -> Con
     if distance <= tolerance * 0.75:  # Ví dụ <= 0.375 với tolerance 0.50
         return ConfidenceLevel.HIGH
     return ConfidenceLevel.MEDIUM
-

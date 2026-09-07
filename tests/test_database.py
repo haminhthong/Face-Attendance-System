@@ -111,7 +111,6 @@ def test_attendance_report_handles_absent_students(tmp_path, monkeypatch) -> Non
 
     report = database.attendance_report(session_id)
     assert len(report) == 2
-    statuses = dict(zip(report["MSSV"], report["Trạng thái"]))
+    statuses = dict(zip(report["MSSV"], report["Trạng thái"], strict=True))
     assert statuses["SV001"] == "Có mặt"
     assert statuses["SV002"] == "Vắng"
-

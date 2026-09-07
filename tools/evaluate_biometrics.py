@@ -34,23 +34,37 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
         raise ValueError("Manifest phải có danh sách identities không rỗng.")
 
     seen_hashes: dict[str, str] = {}
+    seen_identity_ids: set[str] = set()
     for identity in identities:
+        if not isinstance(identity, dict):
+            raise ValueError("Mỗi identity trong manifest phải là một object.")
+        identity_id = str(identity.get("identity_id", "")).strip()
+        if not identity_id or identity_id in seen_identity_ids:
+            raise ValueError("identity_id phải tồn tại và không được trùng.")
+        seen_identity_ids.add(identity_id)
         role = identity.get("role")
         if role not in {"known", "unknown"}:
             raise ValueError("role phải là known hoặc unknown.")
         captures = identity.get("captures", [])
-        if not captures:
-            raise ValueError(f"Identity {identity.get('identity_id')} chưa có captures.")
+        if not isinstance(captures, list) or not captures:
+            raise ValueError(f"Identity {identity_id} chưa có captures.")
         sessions_by_split: dict[str, set[str]] = {}
         for capture in captures:
+            if not isinstance(capture, dict):
+                raise ValueError(f"Identity {identity_id} có capture không hợp lệ.")
             split = capture.get("split")
             session = capture.get("capture_session")
-            image_path = BASE_DIR / capture.get("path", "")
+            relative_path = Path(str(capture.get("path", "")))
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                raise ValueError(
+                    f"Đường dẫn capture không được thoát khỏi repository: {relative_path}"
+                )
+            image_path = (BASE_DIR / relative_path).resolve()
             if split not in {"enrollment", "validation", "test"}:
                 raise ValueError("split phải là enrollment, validation hoặc test.")
             if not session:
                 raise ValueError("Mỗi capture phải có capture_session.")
-            if not image_path.is_file():
+            if BASE_DIR not in image_path.parents or not image_path.is_file():
                 raise FileNotFoundError(f"Không tìm thấy ảnh trong manifest: {image_path}")
             digest = _file_hash(image_path)
             previous = seen_hashes.get(digest)
@@ -61,29 +75,35 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
             seen_hashes[digest] = str(image_path)
             sessions_by_split.setdefault(split, set()).add(str(session))
 
-        if role == "known" and len(sessions_by_split.get("enrollment", set())) == 0:
-            raise ValueError(f"Known identity {identity.get('identity_id')} thiếu enrollment.")
+        if role == "known" and not sessions_by_split.get("enrollment"):
+            raise ValueError(f"Known identity {identity_id} thiếu enrollment.")
+        if role == "unknown" and sessions_by_split.get("enrollment"):
+            raise ValueError(f"Unknown identity {identity_id} không được có enrollment.")
         if role == "known" and (
             sessions_by_split.get("enrollment", set()) & sessions_by_split.get("validation", set())
             or sessions_by_split.get("enrollment", set()) & sessions_by_split.get("test", set())
         ):
             raise ValueError(
-                f"Identity {identity.get('identity_id')} dùng chung capture_session giữa enrollment và đánh giá."
+                f"Identity {identity_id} dùng chung capture_session giữa enrollment và đánh giá."
             )
 
     return data
 
 
 def evaluate(manifest_path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
-    """Validate manifest và trả metadata; phần encoding/evaluation chạy sau gate này."""
+    """Validate manifest và trả metadata; chưa chạy encoding hoặc hiệu chuẩn."""
     manifest = validate_manifest(manifest_path)
     return {
         "schema_version": 1,
         "dataset_type": "private_real_biometric",
-        "deployable": True,
+        "deployable": False,
+        "status": "manifest_valid_only",
         "identities": len(manifest["identities"]),
         "manifest_sha256": _file_hash(manifest_path),
-        "note": "Threshold chỉ được chọn trên validation và test chỉ chạy sau khi freeze policy.",
+        "note": (
+            "Manifest hợp lệ nhưng tool chưa encode ảnh, tính metric hoặc freeze policy. "
+            "Không dùng kết quả này để phát hành threshold."
+        ),
     }
 
 
@@ -92,8 +112,12 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = evaluate(args.manifest)
+    try:
+        result = evaluate(args.manifest)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
     if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))

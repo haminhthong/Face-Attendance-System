@@ -22,9 +22,12 @@ import numpy as np
 try:
     from streamlit_webrtc import VideoProcessorBase
 except ImportError:
+
     class VideoProcessorBase:  # type: ignore[no-redef]
         """Fallback class when streamlit_webrtc is not installed."""
+
         pass
+
 
 from .config import (
     ATTEMPT_COOLDOWN_SECONDS,
@@ -131,9 +134,7 @@ def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
     blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     brightness = float(gray.mean())
     if blur_score < MIN_BLUR_SCORE:
-        raise ValueError(
-            f"Ảnh quá mờ (blur={blur_score:.1f}, yêu cầu ≥ {MIN_BLUR_SCORE:.0f})."
-        )
+        raise ValueError(f"Ảnh quá mờ (blur={blur_score:.1f}, yêu cầu ≥ {MIN_BLUR_SCORE:.0f}).")
 
     # 2. Kiểm tra độ sáng trung bình
     if not MIN_BRIGHTNESS <= brightness <= MAX_BRIGHTNESS:
@@ -151,9 +152,7 @@ def decode_and_validate_face(image_bytes: bytes) -> EnrollmentResult:
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     locations = face_recognition.face_locations(image_rgb, number_of_times_to_upsample=1)
     if len(locations) != 1:
-        raise ValueError(
-            f"Mỗi ảnh phải có đúng 1 khuôn mặt; hệ thống tìm thấy {len(locations)}."
-        )
+        raise ValueError(f"Mỗi ảnh phải có đúng 1 khuôn mặt; hệ thống tìm thấy {len(locations)}.")
 
     # 4. Kiểm tra kích thước khuôn mặt
     top, right, bottom, left = locations[0]
@@ -273,7 +272,9 @@ def enroll_student_images(
             valid_unique.append((name_i, res_i))
 
     if not valid_unique:
-        raise ValueError("Tất cả ảnh tải lên đều bị trùng lặp hoặc near-duplicate. " + " | ".join(errors))
+        raise ValueError(
+            "Tất cả ảnh tải lên đều bị trùng lặp hoặc near-duplicate. " + " | ".join(errors)
+        )
 
     if consent_given is True and len(valid_unique) < 5:
         raise ValueError(
@@ -316,7 +317,9 @@ def enroll_student_images(
                     "Profile biometric hiện tại dùng model/version khác; "
                     "hãy thu hồi và đăng ký lại thay vì trộn hai vector space."
                 )
-            existing_embeddings = get_student_embeddings(int(existing_student["id"]), selected_policy)
+            existing_embeddings = get_student_embeddings(
+                int(existing_student["id"]), selected_policy
+            )
             for _, result in valid_unique:
                 if existing_embeddings:
                     nearest = min(
@@ -408,7 +411,9 @@ def load_templates(
         mismatch_params += (session_id,)
     mismatch_query += " WHERE " + " AND ".join(mismatch_conditions)
     with get_connection() as connection:
-        mismatch_count = int(connection.execute(mismatch_query, mismatch_params).fetchone()["total"])
+        mismatch_count = int(
+            connection.execute(mismatch_query, mismatch_params).fetchone()["total"]
+        )
     if mismatch_count:
         raise RuntimeError(
             "Gallery chứa embedding không tương thích với recognition policy; "
@@ -469,7 +474,7 @@ class RecognitionEngine:
     - So khớp Open-Set với từ chối người lạ (Matcher).
     - Máy trạng thái liveness chớp mắt (BoKiemTraChopMat).
     - Đếm xác nhận liên tiếp nhiều khung hình cùng danh tính ổn định (Confirmation frames).
-    - Clean Architecture: Chỉ sinh RecognitionDecision DTO, chuyển giao lưu trữ cho AttendanceService.
+    - Phân tầng nghiệp vụ: Chỉ sinh RecognitionDecision DTO và giao lưu trữ cho AttendanceService.
     - Khóa Threading Lock cho đồng bộ sự kiện sang UI Streamlit.
     """
 
@@ -666,14 +671,16 @@ class RecognitionEngine:
         else:
             count = self.confirm_counts.get(template.student_id, 0)
             stable_ms = int(
-                max(0.0, time.monotonic() - (self.tracking_started_at or time.monotonic()))
-                * 1000
+                max(0.0, time.monotonic() - (self.tracking_started_at or time.monotonic())) * 1000
             )
             if not live:
                 color = (0, 215, 255)  # Vàng: Cần chớp mắt
                 label = f"{template.student_code} - CHỚP MẮT"
                 self.set_event("warning", f"{template.student_code}: Hãy chớp mắt một lần.")
-            elif count < self.policy.minimum_observations or stable_ms < self.policy.stable_duration_ms:
+            elif (
+                count < self.policy.minimum_observations
+                or stable_ms < self.policy.stable_duration_ms
+            ):
                 color = (0, 215, 255)  # Vàng: Đang xác nhận giữ yên
                 label = (
                     f"{template.student_code} - GIỮ YÊN "
@@ -684,7 +691,7 @@ class RecognitionEngine:
                 label = f"{template.student_code} - KHỚP {distance:.3f} (Δ={margin:.3f})"
                 now_mono = time.monotonic()
                 last = self.last_attempt.get(template.student_id, 0.0)
-                # Ghi điểm danh qua Clean Architecture Decision Service
+                # Ghi điểm danh qua tầng dịch vụ quyết định nghiệp vụ
                 if now_mono - last >= ATTEMPT_COOLDOWN_SECONDS:
                     decision = RecognitionDecision(
                         student_id=template.student_id,
@@ -724,7 +731,6 @@ class RecognitionEngine:
         new_annotations.append((top, right, bottom, left, color, label))
         self.last_annotations = new_annotations
         return self.draw_annotations(image_bgr)
-
 
 
 class AttendanceVideoProcessor(VideoProcessorBase):

@@ -64,6 +64,32 @@ class RecognitionPolicy:
         """Chuyển policy sang dict JSON-friendly."""
         return asdict(self)
 
+    def matches_evidence(
+        self,
+        *,
+        policy_version: str,
+        distance_threshold: float,
+        margin_threshold: float,
+        aggregation_strategy: str,
+        embedding_model: str,
+        embedding_model_version: str,
+        stable_duration_ms: int,
+        liveness_policy: str,
+        recognition_policy_hash: str,
+    ) -> bool:
+        """Kiểm tra evidence có đúng policy đang chạy hay không."""
+        return (
+            policy_version == self.policy_version
+            and distance_threshold == self.distance_threshold
+            and margin_threshold == self.identity_margin
+            and aggregation_strategy == self.aggregation_strategy
+            and embedding_model == self.embedding_model
+            and embedding_model_version == self.embedding_model_version
+            and stable_duration_ms == self.stable_duration_ms
+            and liveness_policy == self.liveness_policy
+            and recognition_policy_hash == self.policy_hash
+        )
+
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "RecognitionPolicy":
         """Đọc cả format phẳng cũ và format nhóm theo embedding/matching."""
@@ -83,9 +109,7 @@ class RecognitionPolicy:
                     embedding.get("version", cls.embedding_model_version),
                 )
             ),
-            embedding_dimension=int(
-                data.get("embedding_dim", embedding.get("dimension", 128))
-            ),
+            embedding_dimension=int(data.get("embedding_dim", embedding.get("dimension", 128))),
             metric=str(data.get("distance_metric", matching.get("metric", cls.metric))),
             aggregation_strategy=str(
                 data.get(

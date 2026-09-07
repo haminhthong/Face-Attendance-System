@@ -13,4 +13,3 @@ __all__ = [
     "record_manual_attendance",
     "process_student_enrollment",
 ]
-

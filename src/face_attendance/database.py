@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from . import config
-from .config import BIOMETRIC_RETENTION_DAYS, DB_PATH  # noqa: F401 - giữ API test/legacy
+from .config import BIOMETRIC_RETENTION_DAYS, DB_PATH  # noqa: F401 - giữ API kiểm thử cũ
 from .policy import DEFAULT_RECOGNITION_POLICY, RecognitionPolicy
 from .utils import (
     display_datetime,
@@ -393,7 +393,7 @@ def upsert_student(
         if existing is None:
             # Khi caller chưa truyền consent, chỉ tạo hồ sơ pending để tương thích
             # với các tool seed cũ; application enrollment luôn phải truyền True.
-            consent_at = now if consent_given is True else ""
+            consent_at = now if consent_given is True else None
             status = "granted" if consent_given is True else "pending"
             connection.execute(
                 """
@@ -403,8 +403,16 @@ def upsert_student(
                     created_at_utc, updated_at_utc
                 ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
                 """,
-                (code, name, class_value, consent_at, policy_version if consent_given else None,
-                 status, now, now),
+                (
+                    code,
+                    name,
+                    class_value,
+                    consent_at,
+                    policy_version if consent_given else None,
+                    status,
+                    now,
+                    now,
+                ),
             )
             if consent_given is True:
                 connection.execute(
@@ -551,6 +559,27 @@ def get_student_by_code(student_code: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
+def has_granted_biometric_consent(
+    student_id: int,
+    policy_version: str | None = None,
+) -> bool:
+    """Kiểm tra consent hiện tại trước khi ghi nhận attendance sinh trắc học."""
+    query = """
+        SELECT 1
+        FROM students
+        WHERE id = ?
+          AND active = 1
+          AND consent_status = 'granted'
+          AND consent_at_utc IS NOT NULL
+    """
+    params: list[Any] = [student_id]
+    if policy_version is not None:
+        query += " AND consent_policy_version = ?"
+        params.append(policy_version)
+    with get_connection() as connection:
+        return connection.execute(query, params).fetchone() is not None
+
+
 def get_student_embeddings(
     student_id: int,
     policy: RecognitionPolicy | None = None,
@@ -560,17 +589,22 @@ def get_student_embeddings(
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT embedding, embedding_dim
-            FROM face_embeddings
-            WHERE student_id = ?
-              AND revoked_at_utc IS NULL
-              AND embedding_dim = ?
-              AND embedding_model = ?
-              AND embedding_model_version = ?
-            ORDER BY id
+            SELECT fe.embedding, fe.embedding_dim
+            FROM face_embeddings fe
+            JOIN students st ON st.id = fe.student_id
+            WHERE fe.student_id = ?
+              AND st.active = 1
+              AND st.consent_status = 'granted'
+              AND st.consent_policy_version = ?
+              AND fe.revoked_at_utc IS NULL
+              AND fe.embedding_dim = ?
+              AND fe.embedding_model = ?
+              AND fe.embedding_model_version = ?
+            ORDER BY fe.id
             """,
             (
                 student_id,
+                selected_policy.policy_version,
                 selected_policy.embedding_dimension,
                 selected_policy.embedding_model,
                 selected_policy.embedding_model_version,
@@ -584,7 +618,9 @@ def get_student_embeddings(
     return vectors
 
 
-def remove_student_biometrics(student_id: int, audit_event: str = "student_biometrics_removed") -> None:
+def remove_student_biometrics(
+    student_id: int, audit_event: str = "student_biometrics_removed"
+) -> None:
     """Xóa vector khuôn mặt và vô hiệu hóa sinh viên.
 
     Args:
@@ -668,10 +704,21 @@ def purge_expired_biometrics(retention_days: int = BIOMETRIC_RETENTION_DAYS) -> 
         connection.execute(
             """
             UPDATE students
-            SET active = 0, updated_at_utc = ?
+            SET active = 0, consent_status = 'revoked', updated_at_utc = ?
             WHERE active = 1
               AND NOT EXISTS (
                   SELECT 1 FROM face_embeddings fe WHERE fe.student_id = students.id
+              )
+            """,
+            (utc_iso(),),
+        )
+        connection.execute(
+            """
+            UPDATE biometric_consents
+            SET status = 'revoked', revoked_at_utc = ?
+            WHERE status = 'granted'
+              AND student_id IN (
+                  SELECT id FROM students WHERE consent_status = 'revoked'
               )
             """,
             (utc_iso(),),
@@ -707,9 +754,7 @@ def create_course(course_code: str, course_name: str, lecturer: str) -> None:
 def list_courses() -> list[sqlite3.Row]:
     """Lấy danh sách tất cả các môn học sắp xếp theo mã môn."""
     with get_connection() as connection:
-        return connection.execute(
-            "SELECT * FROM courses ORDER BY course_code"
-        ).fetchall()
+        return connection.execute("SELECT * FROM courses ORDER BY course_code").fetchall()
 
 
 def get_course_roster(course_id: int) -> set[int]:
@@ -734,9 +779,7 @@ def set_course_roster(course_id: int, student_ids: Iterable[int]) -> int:
     """
     normalized_ids = sorted({int(student_id) for student_id in student_ids})
     with get_connection() as connection:
-        course = connection.execute(
-            "SELECT id FROM courses WHERE id = ?", (course_id,)
-        ).fetchone()
+        course = connection.execute("SELECT id FROM courses WHERE id = ?", (course_id,)).fetchone()
         if course is None:
             raise ValueError("Không tìm thấy môn học.")
         if normalized_ids:
@@ -749,9 +792,7 @@ def set_course_roster(course_id: int, student_ids: Iterable[int]) -> int:
             if valid_ids != set(normalized_ids):
                 raise ValueError("Danh sách có sinh viên không tồn tại hoặc đã bị vô hiệu hóa.")
 
-        connection.execute(
-            "DELETE FROM course_enrollments WHERE course_id = ?", (course_id,)
-        )
+        connection.execute("DELETE FROM course_enrollments WHERE course_id = ?", (course_id,))
         now = utc_iso()
         connection.executemany(
             """
@@ -853,9 +894,7 @@ def change_session_status(session_id: int, new_status: str) -> None:
             return
         allowed_transitions = {"scheduled": "open", "open": "closed"}
         if allowed_transitions.get(current_status) != new_status:
-            raise ValueError(
-                f"Không thể chuyển trạng thái từ {current_status} sang {new_status}."
-            )
+            raise ValueError(f"Không thể chuyển trạng thái từ {current_status} sang {new_status}.")
         connection.execute(
             "UPDATE attendance_sessions SET status = ? WHERE id = ?",
             (new_status, session_id),
@@ -938,15 +977,13 @@ def mark_attendance(
         policy_version: Phiên bản chính sách nhận diện.
         confirmation_frames: Số khung hình nhận diện liên tiếp hợp lệ.
         source: Nguồn gốc điểm danh ('face_webrtc', 'manual', etc.).
-        tolerance: Ngưỡng khoảng cách tùy biến (None lấy mặc định config).
+        tolerance: Ngưỡng tương thích client cũ; luồng sinh trắc học dùng policy evidence.
 
     Returns:
         tuple[str, str]: (mã_kết_quả, thông_báo_chi_tiết).
     """
     actual_tolerance = (
-        tolerance
-        if tolerance is not None
-        else DEFAULT_RECOGNITION_POLICY.distance_threshold
+        tolerance if tolerance is not None else DEFAULT_RECOGNITION_POLICY.distance_threshold
     )
     if not np.isfinite(distance) or not 0 <= distance <= actual_tolerance:
         return "rejected", "Kết quả nhận diện không đạt ngưỡng cho phép."

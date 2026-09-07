@@ -1,11 +1,10 @@
 """Load test và concurrency benchmark kiểm thử khả năng đáp ứng nhiều request đồng thời."""
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-import time
 
 import numpy as np
-import pytest
 
 from face_attendance import config, database
 from face_attendance.utils import utc_now
@@ -54,7 +53,9 @@ def test_concurrent_attendance_requests_thread_safety(tmp_path, monkeypatch) -> 
     created_count = sum(1 for res, _ in results if res == "created")
     assert created_count == 50
     avg_latency_ms = (elapsed / 50.0) * 1000.0
-    print(f"\n[LOAD TEST 50 CONCURRENT REQUESTS] Elapsed: {elapsed:.2f}s, Avg Latency: {avg_latency_ms:.2f}ms/request")
+    print(
+        f"\n[LOAD TEST 50 CONCURRENT REQUESTS] Elapsed: {elapsed:.2f}s, Avg Latency: {avg_latency_ms:.2f}ms/request"
+    )
 
 
 def test_concurrent_duplicate_attendance_lock(tmp_path, monkeypatch) -> None:

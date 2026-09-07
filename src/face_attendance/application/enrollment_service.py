@@ -27,9 +27,7 @@ def process_student_enrollment(
         tuple[int, list[str]]: (Số ảnh mẫu đã đăng ký thành công, Cảnh báo/lỗi nếu có).
     """
     if not consent_given:
-        raise ValueError(
-            "Cần consent rõ ràng trước khi giải mã hoặc xử lý ảnh khuôn mặt."
-        )
+        raise ValueError("Cần consent rõ ràng trước khi giải mã hoặc xử lý ảnh khuôn mặt.")
 
     clean_code = normalize_student_code(student_code)
     clean_name = normalize_person_name(full_name)

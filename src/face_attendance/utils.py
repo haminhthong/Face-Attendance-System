@@ -87,9 +87,7 @@ def normalize_student_code(value: str) -> str:
     """
     code = value.strip().upper()
     if not STUDENT_CODE_PATTERN.fullmatch(code):
-        raise ValueError(
-            "Mã sinh viên phải dài 3-30 ký tự và chỉ gồm chữ, số, '_' hoặc '-'."
-        )
+        raise ValueError("Mã sinh viên phải dài 3-30 ký tự và chỉ gồm chữ, số, '_' hoặc '-'.")
     return code
 
 
@@ -107,9 +105,7 @@ def normalize_course_code(value: str) -> str:
     """
     code = value.strip().upper()
     if not COURSE_CODE_PATTERN.fullmatch(code):
-        raise ValueError(
-            "Mã môn học phải dài 2-30 ký tự và chỉ gồm chữ, số, '_', '-' hoặc '.'."
-        )
+        raise ValueError("Mã môn học phải dài 2-30 ký tự và chỉ gồm chữ, số, '_', '-' hoặc '.'.")
     return code
 
 
@@ -146,9 +142,7 @@ def make_pin_hash(pin: str) -> str:
     if not re.fullmatch(r"\d{6,12}", pin):
         raise ValueError("PIN phải gồm từ 6 đến 12 chữ số.")
     salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", pin.encode("utf-8"), salt, PIN_ITERATIONS
-    )
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, PIN_ITERATIONS)
     return "pbkdf2_sha256${}${}${}".format(
         PIN_ITERATIONS,
         base64.b64encode(salt).decode("ascii"),
@@ -179,9 +173,7 @@ def verify_pin(pin: str, stored_value: str) -> bool:
         expected = base64.b64decode(encoded_digest)
         if len(salt) != 16 or len(expected) != 32:
             return False
-        actual = hashlib.pbkdf2_hmac(
-            "sha256", pin.encode("utf-8"), salt, iteration_count
-        )
+        actual = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, iteration_count)
         return hmac.compare_digest(actual, expected)
     except (ValueError, TypeError):
         return False

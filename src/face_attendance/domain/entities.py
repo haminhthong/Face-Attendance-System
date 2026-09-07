@@ -198,8 +198,12 @@ def build_rejected_result(
         AttendanceResult: Đối tượng kết quả từ chối.
     """
     reason_enum = reason if isinstance(reason, RejectionReason) else RejectionReason(reason)
-    conf = get_confidence_level(distance, tolerance) if distance is not None else ConfidenceLevel.LOW
-    quality = get_match_quality(distance, tolerance) if distance is not None else MatchQuality.WEAK_MATCH
+    conf = (
+        get_confidence_level(distance, tolerance) if distance is not None else ConfidenceLevel.LOW
+    )
+    quality = (
+        get_match_quality(distance, tolerance) if distance is not None else MatchQuality.WEAK_MATCH
+    )
     return AttendanceResult(
         student_id=student_id,
         status=AttendanceStatus.ABSENT,

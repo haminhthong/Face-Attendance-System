@@ -125,16 +125,12 @@ def generate_synthetic_eval_data(
             noise = noise / np.linalg.norm(noise)
             emb = v * np.sqrt(1 - alpha**2) + noise * alpha
             emb = emb / np.linalg.norm(emb)
-            evaluation.append(
-                EvalSample(is_known=True, true_student_id=s_id, embedding=emb)
-            )
+            evaluation.append(EvalSample(is_known=True, true_student_id=s_id, embedding=emb))
 
     for _ in range(val_unknown):
         v = rng.standard_normal(128)
         v = v / np.linalg.norm(v)
-        evaluation.append(
-            EvalSample(is_known=False, true_student_id=None, embedding=v)
-        )
+        evaluation.append(EvalSample(is_known=False, true_student_id=None, embedding=v))
 
     return enrollment, evaluation
 
@@ -187,9 +183,7 @@ def evaluate_dataset(
             else:
                 unknown_correct_rejects += 1
 
-    elapsed_ms = (
-        (time.perf_counter() - start_time) / max(1, len(eval_samples))
-    ) * 1000.0
+    elapsed_ms = ((time.perf_counter() - start_time) / max(1, len(eval_samples))) * 1000.0
 
     return EvaluationMetrics(
         total_known=total_known,
@@ -241,12 +235,13 @@ def build_ascii_distribution_chart(
             f"  [{low:.2f} - {high:.2f}]  |  {bar_gen:<16} ({gen_counts[i]:3d})  |  {bar_imp:<16} ({imp_counts[i]:3d}) {marker}"
         )
 
-
-    chart_lines.extend([
-        "  ──────────────────────────────────────────────────────────────────────────",
-        "  Ký hiệu: █ = Genuine (khoảng cách nhỏ hơn), ▒ = Impostor (khoảng cách lớn hơn)",
-        "```",
-    ])
+    chart_lines.extend(
+        [
+            "  ──────────────────────────────────────────────────────────────────────────",
+            "  Ký hiệu: █ = Genuine (khoảng cách nhỏ hơn), ▒ = Impostor (khoảng cách lớn hơn)",
+            "```",
+        ]
+    )
     return "\n".join(chart_lines)
 
 
@@ -289,7 +284,7 @@ def run_evaluation() -> str:
         "## 2. Grid check khoảng cách và margin (không phải calibration sinh trắc học)",
         "",
         "| Khoảng cách (T_d) | Margin (T_m) | Known reject | Wrong-ID | Unknown reject |",
-        "|:---:|:---:|:---:|:---:|:---:|:---:|:---:|",
+        "|:---:|:---:|:---:|:---:|:---:|",
     ]
 
     for th in [0.40, 0.45, 0.50, 0.55]:
@@ -300,37 +295,53 @@ def run_evaluation() -> str:
                 f"{m.known_misid_rate * 100:.1f}% | {m.unknown_correct_rejects}/{m.total_unknown} |"
             )
 
-    report_lines.extend([
-        "",
-        "---",
-        "",
-        "## 3. So Sánh 3 Chiến Lược Gom Cụm Mẫu (Identity Aggregation Strategies)",
-        "",
-        "Khi sinh viên đăng ký nhiều ảnh mẫu (ví dụ 4 ảnh/người), việc gom khoảng cách có thể ảnh hưởng đến độ lệch:",
-        "",
-        "| Chiến lược gom cụm | Định nghĩa | TAR | Wrong-ID | Unknown FAR | Thời gian/mẫu |",
-        "|---|---|:---:|:---:|:---:|:---:|",
-    ])
+    report_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 3. So Sánh 3 Chiến Lược Gom Cụm Mẫu (Identity Aggregation Strategies)",
+            "",
+            "Khi sinh viên đăng ký nhiều ảnh mẫu (ví dụ 4 ảnh/người), việc gom khoảng cách có thể ảnh hưởng đến độ lệch:",
+            "",
+            "| Chiến lược gom cụm | Định nghĩa | TAR | Wrong-ID | Unknown FAR | Thời gian/mẫu |",
+            "|---|---|:---:|:---:|:---:|:---:|",
+        ]
+    )
 
     for strat, name, desc in [
-        (AggregationStrategy.MIN_DISTANCE, "Strategy A: Min Distance", "Khoảng cách nhỏ nhất đến bất kỳ mẫu nào"),
-        (AggregationStrategy.CENTROID, "Strategy B: Centroid", "Khoảng cách tới vector trọng tâm L2-normalized"),
-        (AggregationStrategy.TOP_K_MEAN, "Strategy C: Top-2 Mean", "Trung bình khoảng cách của 2 mẫu gần nhất"),
+        (
+            AggregationStrategy.MIN_DISTANCE,
+            "Strategy A: Min Distance",
+            "Khoảng cách nhỏ nhất đến bất kỳ mẫu nào",
+        ),
+        (
+            AggregationStrategy.CENTROID,
+            "Strategy B: Centroid",
+            "Khoảng cách tới vector trọng tâm L2-normalized",
+        ),
+        (
+            AggregationStrategy.TOP_K_MEAN,
+            "Strategy C: Top-2 Mean",
+            "Trung bình khoảng cách của 2 mẫu gần nhất",
+        ),
     ]:
         m = evaluate_dataset(enrollment, eval_samples, 0.50, 0.05, strategy=strat, top_k=2)
         report_lines.append(
             f"| **{name}** | {desc} | {m.tar * 100:.1f}% | {m.known_misid_rate * 100:.1f}% | {m.unknown_far * 100:.1f}% | {m.elapsed_ms:.2f} ms |"
         )
 
-    report_lines.extend([
-        "",
-        "---",
-        "",
-        "## 4. Kết luận",
-        "- Matcher math đã chạy qua dữ liệu tổng hợp.",
-        "- Kết quả này **không phải** độ chính xác camera và không được dùng để chọn threshold production.",
-        "- ``deployable = false``: cần private validation/test session để tạo policy.",
-    ])
+    report_lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## 4. Kết luận",
+            "- Matcher math đã chạy qua dữ liệu tổng hợp.",
+            "- Kết quả này **không phải** độ chính xác camera và không được dùng để chọn threshold production.",
+            "- ``deployable = false``: cần private validation/test session để tạo policy.",
+        ]
+    )
 
     content = "\n".join(report_lines)
     report_path = RESULTS_DIR / "evaluation_report.md"

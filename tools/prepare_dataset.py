@@ -73,7 +73,7 @@ def init_evaluation_dataset_structure() -> None:
         readme_path.write_text(
             "# Data Directory Structure for Face Recognition Evaluation\n\n"
             "Chứa cấu trúc đánh giá AI độc lập:\n"
-            "- `private/enrollment/`: Ảnh đăng ký của các sinh viên tham chiếu (3-5 ảnh/người).\n"
+            "- `private/enrollment/`: Ảnh đăng ký của các sinh viên tham chiếu (tối thiểu 5 ảnh/người).\n"
             "- `private/validation/`: Tập kiểm định dùng để dò threshold (chọn ngưỡng).\n"
             "- `private/test/`: Tập kiểm thử độc lập chỉ chạy sau khi đã chốt threshold.\n"
             "- `results/`: Kết quả chạy benchmark và biểu đồ.\n\n"
@@ -134,20 +134,37 @@ def validate_capture_manifest(manifest_path: Path | None = None) -> None:
         raise ValueError("Manifest phải có identities không rỗng.")
 
     seen_hashes: dict[str, str] = {}
+    seen_identity_ids: set[str] = set()
     for identity in identities:
-        identity_id = identity.get("identity_id")
+        if not isinstance(identity, dict):
+            raise ValueError("Mỗi identity trong manifest phải là một object.")
+        identity_id = str(identity.get("identity_id", "")).strip()
+        if not identity_id or identity_id in seen_identity_ids:
+            raise ValueError("identity_id phải tồn tại và không được trùng.")
+        seen_identity_ids.add(identity_id)
         role = identity.get("role")
         if role not in {"known", "unknown"}:
             raise ValueError(f"{identity_id}: role phải là known hoặc unknown.")
         captures = identity.get("captures", [])
+        if not isinstance(captures, list) or not captures:
+            raise ValueError(f"{identity_id}: captures không được rỗng.")
         split_sessions: dict[str, set[str]] = {}
         for capture in captures:
+            if not isinstance(capture, dict):
+                raise ValueError(f"{identity_id}: capture phải là một object.")
             split = capture.get("split")
             session = capture.get("capture_session")
             relative_path = capture.get("path")
-            if split not in {"enrollment", "validation", "test"} or not session or not relative_path:
+            if (
+                split not in {"enrollment", "validation", "test"}
+                or not session
+                or not relative_path
+            ):
                 raise ValueError(f"{identity_id}: capture thiếu split/session/path hợp lệ.")
-            image_path = BASE_DIR / relative_path
+            relative = Path(str(relative_path))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"{identity_id}: path capture không hợp lệ.")
+            image_path = (BASE_DIR / relative).resolve()
             if not image_path.is_file():
                 raise FileNotFoundError(f"Không tìm thấy ảnh trong manifest: {image_path}")
             digest = calculate_file_hash(image_path)
@@ -162,11 +179,12 @@ def validate_capture_manifest(manifest_path: Path | None = None) -> None:
             raise ValueError(f"{identity_id}: known identity phải có enrollment.")
         if role == "unknown" and split_sessions.get("enrollment"):
             raise ValueError(f"{identity_id}: unknown identity không được có enrollment.")
-        if (
-            split_sessions.get("enrollment", set()) & split_sessions.get("validation", set())
-            or split_sessions.get("enrollment", set()) & split_sessions.get("test", set())
-        ):
-            raise ValueError(f"{identity_id}: không được dùng chung capture_session với enrollment.")
+        if split_sessions.get("enrollment", set()) & split_sessions.get(
+            "validation", set()
+        ) or split_sessions.get("enrollment", set()) & split_sessions.get("test", set()):
+            raise ValueError(
+                f"{identity_id}: không được dùng chung capture_session với enrollment."
+            )
 
 
 def check_near_duplicates_phash(threshold: int = 3) -> Dict[str, List[str]]:

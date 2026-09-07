@@ -1,6 +1,7 @@
-"""Unit/Integration tests cho Clean Architecture RecognitionDecision flow và Manual Correction."""
+"""Kiểm thử luồng RecognitionDecision và điều chỉnh điểm danh thủ công."""
 
 from datetime import timedelta
+
 import pytest
 
 from face_attendance import config, database
@@ -13,7 +14,6 @@ from face_attendance.domain import (
     RecognitionDecision,
     RejectionReason,
     SessionClosedError,
-    StudentNotInRosterError,
 )
 from face_attendance.utils import utc_iso, utc_now
 
@@ -25,7 +25,13 @@ def setup_attendance_env(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_PATH", test_db)
     database.init_database()
 
-    student = database.upsert_student("SV001", "Nguyễn Văn An", "K23")
+    student = database.upsert_student(
+        "SV001",
+        "Nguyễn Văn An",
+        "K23",
+        consent_given=True,
+        consent_policy_version="face-policy-v1",
+    )
     student_id = int(student["id"])
     database.create_course("CS101", "Nhập môn lập trình", "Trần Văn Bình")
     course_id = int(database.list_courses()[0]["id"])
@@ -162,8 +168,60 @@ def test_biometric_attendance_consent_revoked(setup_attendance_env) -> None:
         timestamp_utc=utc_iso(),
     )
 
-    with pytest.raises(StudentNotInRosterError):
-        record_biometric_attendance(session_id, decision)
+    res = record_biometric_attendance(session_id, decision)
+    assert res.is_accepted is False
+    assert res.rejection_reason == RejectionReason.NO_CONSENT
+
+
+def test_biometric_attendance_requires_granted_consent(setup_attendance_env) -> None:
+    student_id, session_id = setup_attendance_env
+    with database.get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE students
+            SET consent_status = 'pending', consent_at_utc = NULL
+            WHERE id = ?
+            """,
+            (student_id,),
+        )
+
+    decision = RecognitionDecision(
+        student_id=student_id,
+        student_code="SV001",
+        full_name="Nguyễn Văn An",
+        distance=0.32,
+        second_distance=0.55,
+        margin=0.23,
+        liveness_passed=True,
+        confirmation_frames=5,
+        policy_version="face-policy-v1",
+        timestamp_utc=utc_iso(),
+    )
+
+    res = record_biometric_attendance(session_id, decision)
+    assert res.is_accepted is False
+    assert res.rejection_reason == RejectionReason.NO_CONSENT
+
+
+def test_biometric_attendance_rejects_policy_mismatch(setup_attendance_env) -> None:
+    student_id, session_id = setup_attendance_env
+    decision = RecognitionDecision(
+        student_id=student_id,
+        student_code="SV001",
+        full_name="Nguyễn Văn An",
+        distance=0.32,
+        second_distance=0.55,
+        margin=0.23,
+        liveness_passed=True,
+        confirmation_frames=5,
+        policy_version="face-policy-v1",
+        distance_threshold=0.60,
+        timestamp_utc=utc_iso(),
+    )
+
+    res = record_biometric_attendance(session_id, decision)
+    assert res.is_accepted is False
+    assert res.rejection_reason == RejectionReason.POLICY_MISMATCH
 
 
 def test_manual_attendance_correction_audit(setup_attendance_env) -> None:
@@ -184,7 +242,7 @@ def test_manual_attendance_correction_audit(setup_attendance_env) -> None:
     )
     record_biometric_attendance(session_id, decision)
 
-    # 2. Giảng viên can thiệp thủ công (Human-in-the-loop audit): Đổi thành vắng (absent)
+    # 2. Giảng viên can thiệp thủ công có audit: đổi trạng thái thành vắng.
     res_corr = record_manual_attendance(
         session_id=session_id,
         student_id=student_id,

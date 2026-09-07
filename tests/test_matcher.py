@@ -28,21 +28,15 @@ def test_matcher_rejects_ambiguous_identity() -> None:
 
 def test_matcher_rejects_invalid_template_size() -> None:
     with pytest.raises(ValueError, match="Embedding mẫu"):
-        tim_danh_tinh_tot_nhat(
-            np.zeros(128), [Mau(1, np.zeros(127))], 0.5, 0.05
-        )
+        tim_danh_tinh_tot_nhat(np.zeros(128), [Mau(1, np.zeros(127))], 0.5, 0.05)
 
     with pytest.raises(ValueError, match="Embedding mẫu"):
-        tim_danh_tinh_tot_nhat(
-            np.zeros(128), [Mau(1, np.zeros(129))], 0.5, 0.05
-        )
+        tim_danh_tinh_tot_nhat(np.zeros(128), [Mau(1, np.zeros(129))], 0.5, 0.05)
 
 
 def test_matcher_rejects_invalid_query_size() -> None:
     with pytest.raises(ValueError, match="Embedding đầu vào"):
-        tim_danh_tinh_tot_nhat(
-            np.zeros(127), [Mau(1, np.zeros(128))], 0.5, 0.05
-        )
+        tim_danh_tinh_tot_nhat(np.zeros(127), [Mau(1, np.zeros(128))], 0.5, 0.05)
 
 
 def test_matcher_rejects_nan_or_inf() -> None:
@@ -69,7 +63,7 @@ def test_matcher_boundary_thresholds() -> None:
     # L2 distance between zeros(128) and vec is sqrt(128 * 0.001953125) = sqrt(0.25) = 0.50
     val = np.sqrt(0.25 / 128)
     sample_exact = Mau(1, np.full(128, val))
-    
+
     # Khoảng cách đúng bằng threshold 0.50 -> được chấp nhận
     res_exact = tim_danh_tinh_tot_nhat(query, [sample_exact], 0.50, 0.0)
     assert res_exact.mau is sample_exact

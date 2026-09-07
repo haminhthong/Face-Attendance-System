@@ -1,7 +1,7 @@
 from datetime import timedelta
-from fastapi.testclient import TestClient
+
 import numpy as np
-import pytest
+from fastapi.testclient import TestClient
 
 from face_attendance import api, config, database
 from face_attendance.utils import utc_now
@@ -62,7 +62,13 @@ def test_attendance_success_structured_response(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(database, "DB_PATH", test_db)
     monkeypatch.setattr(api, "API_KEY", "secret-key")
     database.init_database()
-    student = database.upsert_student("SV001", "Nguyen Van A", "12A1")
+    student = database.upsert_student(
+        "SV001",
+        "Nguyen Van A",
+        "12A1",
+        consent_given=True,
+        consent_policy_version="face-policy-v1",
+    )
     student_id = int(student["id"])
     database.save_embedding(student_id, np.zeros(128), "hash_img", 100.0, 100.0, 150, 150)
     database.create_course("MAT101", "Toan Co So", "Giang Vien A")

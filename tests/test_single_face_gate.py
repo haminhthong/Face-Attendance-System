@@ -2,6 +2,7 @@
 
 import sys
 from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 
@@ -75,8 +76,10 @@ def test_single_face_gate_single_face_proceeds(mock_engine: RecognitionEngine) -
     fake_locations = [(10, 50, 60, 10)]
     fake_encoding = [np.zeros(128)]
 
-    with patch("face_recognition.face_locations", return_value=fake_locations), \
-         patch("face_recognition.face_encodings", return_value=fake_encoding):
+    with (
+        patch("face_recognition.face_locations", return_value=fake_locations),
+        patch("face_recognition.face_encodings", return_value=fake_encoding),
+    ):
         mock_engine.process(frame)
 
     assert mock_engine.current_tracking_student_id == 1
@@ -88,8 +91,10 @@ def test_candidate_switching_resets_confirmation(mock_engine: RecognitionEngine)
     fake_locations = [(10, 50, 60, 10)]
 
     # Frame đối tượng SV001 (zeros)
-    with patch("face_recognition.face_locations", return_value=fake_locations), \
-         patch("face_recognition.face_encodings", return_value=[np.zeros(128)]):
+    with (
+        patch("face_recognition.face_locations", return_value=fake_locations),
+        patch("face_recognition.face_encodings", return_value=[np.zeros(128)]),
+    ):
         mock_engine.process(frame)
         assert mock_engine.current_tracking_student_id == 1
         assert mock_engine.confirm_counts[1] == 1
@@ -98,8 +103,10 @@ def test_candidate_switching_resets_confirmation(mock_engine: RecognitionEngine)
         assert mock_engine.confirm_counts[1] == 2
 
     # Đột ngột đổi sang SV002 (ones)
-    with patch("face_recognition.face_locations", return_value=fake_locations), \
-         patch("face_recognition.face_encodings", return_value=[np.ones(128)]):
+    with (
+        patch("face_recognition.face_locations", return_value=fake_locations),
+        patch("face_recognition.face_encodings", return_value=[np.ones(128)]),
+    ):
         mock_engine.process(frame)
         # ID đổi sang 2, confirmation count của SV002 bắt đầu lại từ 1
         assert mock_engine.current_tracking_student_id == 2

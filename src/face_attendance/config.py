@@ -33,9 +33,11 @@ if custom_db:
     DB_PATH = Path(custom_db).expanduser().resolve()
     DATA_DIR = DB_PATH.parent
 else:
-    DATA_DIR = Path(
-        os.getenv("FACE_ATTENDANCE_DATA_DIR", str(BASE_DIR / "face_attendance_data"))
-    ).expanduser().resolve()
+    DATA_DIR = (
+        Path(os.getenv("FACE_ATTENDANCE_DATA_DIR", str(BASE_DIR / "face_attendance_data")))
+        .expanduser()
+        .resolve()
+    )
     DB_PATH = DATA_DIR / "face_attendance.db"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -118,9 +120,7 @@ ATTEMPT_COOLDOWN_SECONDS = 8.0  # Cooldown giữa các lần thử ghi nhận đ
 
 # Chính sách lưu trữ dữ liệu sinh trắc học & Mã hóa PIN
 # Thời hạn lưu embedding trước khi tác vụ dọn dữ liệu xóa bản ghi.
-BIOMETRIC_RETENTION_DAYS = _env_int(
-    "BIOMETRIC_RETENTION_DAYS", 365, 1, 3650
-)
+BIOMETRIC_RETENTION_DAYS = _env_int("BIOMETRIC_RETENTION_DAYS", 365, 1, 3650)
 PIN_ITERATIONS = 240_000  # Số vòng lặp PBKDF2-HMAC-SHA256 băm PIN
 
 # Regex kiểm tra định dạng dữ liệu đầu vào

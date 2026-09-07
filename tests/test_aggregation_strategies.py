@@ -1,6 +1,7 @@
 """Unit tests cho các chiến lược gom cụm khoảng cách danh tính (Identity Aggregation Strategies)."""
 
 from dataclasses import dataclass
+
 import numpy as np
 import pytest
 
@@ -104,7 +105,7 @@ def test_top_k_mean_aggregation() -> None:
 
     d1 = float(np.linalg.norm(v1 - query))
     d2 = float(np.linalg.norm(v2 - query))
-    d3 = float(np.linalg.norm(v3 - query))
+    _d3 = float(np.linalg.norm(v3 - query))
 
     samples = [
         MauKhuonMatMock(1, v1),

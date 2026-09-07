@@ -1,9 +1,7 @@
 """Unit tests cho domain package."""
 
-import pytest
 from face_attendance.domain import (
     AttendanceDecision,
-    AttendanceResult,
     AttendanceStatus,
     ConfidenceLevel,
     RejectionReason,
