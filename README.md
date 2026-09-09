@@ -302,6 +302,8 @@ docker run --rm -p 8501:8501 \
 
 ## 8. Kiểm thử, CI và đánh giá
 
+`httpx` được khai báo trong dependency chính vì các bài kiểm thử API dùng `FastAPI TestClient`; do đó cả `pip install -e .` và `pip install -e ".[dev]"` đều có đủ dependency này.
+
 Các lệnh CI chính:
 
 ```bash
