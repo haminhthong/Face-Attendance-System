@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from ..config import BIOMETRIC_CONSENT_POLICY_VERSION
 from ..utils import normalize_person_name, normalize_student_code
 
 
@@ -13,7 +14,7 @@ def process_student_enrollment(
     class_name: str,
     image_sources: Iterable[Any],
     consent_given: bool = False,
-    consent_policy_version: str = "biometric-consent-v1",
+    consent_policy_version: str = BIOMETRIC_CONSENT_POLICY_VERSION,
 ) -> tuple[int, list[str]]:
     """Chuẩn hóa dữ liệu đầu vào và đăng ký sinh viên kèm ảnh mẫu.
 

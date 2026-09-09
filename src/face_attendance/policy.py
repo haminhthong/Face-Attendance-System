@@ -37,6 +37,8 @@ class RecognitionPolicy:
 
     def __post_init__(self) -> None:
         """Bảo vệ policy khỏi các giá trị có thể làm lệch logic runtime."""
+        if not self.policy_version or not self.embedding_model or not self.embedding_model_version:
+            raise ValueError("Policy phải có version và thông tin model đầy đủ.")
         if self.embedding_dimension != 128:
             raise ValueError("Phiên bản hiện tại chỉ hỗ trợ embedding 128 chiều.")
         if self.metric != "euclidean_l2":
@@ -73,6 +75,7 @@ class RecognitionPolicy:
         aggregation_strategy: str,
         embedding_model: str,
         embedding_model_version: str,
+        confirmation_frames: int,
         stable_duration_ms: int,
         liveness_policy: str,
         recognition_policy_hash: str,
@@ -85,7 +88,9 @@ class RecognitionPolicy:
             and aggregation_strategy == self.aggregation_strategy
             and embedding_model == self.embedding_model
             and embedding_model_version == self.embedding_model_version
-            and stable_duration_ms == self.stable_duration_ms
+            # Đây là bằng chứng quan sát được; policy chỉ đặt mức tối thiểu.
+            and confirmation_frames >= self.minimum_observations
+            and stable_duration_ms >= self.stable_duration_ms
             and liveness_policy == self.liveness_policy
             and recognition_policy_hash == self.policy_hash
         )
@@ -148,8 +153,15 @@ class RecognitionPolicy:
                     liveness.get("ttl_seconds", cls.liveness_ttl_seconds),
                 )
             ),
-            calibrated=bool(data.get("calibrated", False)),
+            calibrated=_strict_bool(data.get("calibrated", False), "calibrated"),
         )
+
+
+def _strict_bool(value: Any, field_name: str) -> bool:
+    """Đọc boolean thật từ JSON, không biến chuỗi 'false' thành True."""
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} phải là boolean true/false.")
 
 
 def load_recognition_policy(path: str | Path | None = None) -> RecognitionPolicy:

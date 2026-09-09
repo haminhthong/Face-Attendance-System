@@ -134,7 +134,10 @@ def tim_danh_tinh_tot_nhat(
     if len(ung_vien) > 1:
         khoang_cach_thu_hai, _, id_thu_hai = ung_vien[1]
     else:
-        khoang_cach_thu_hai = float("inf")
+        # Không có identity cạnh tranh để tạo Top-2 thật. Dùng một sentinel
+        # hữu hạn đúng bằng margin policy để evidence có thể serialize và được
+        # kiểm tra nhất quán ở DTO/API; đây không phải khoảng cách đo được.
+        khoang_cach_thu_hai = khoang_cach_tot_nhat + nguong_phan_biet
         id_thu_hai = None
 
     do_phan_biet = khoang_cach_thu_hai - khoang_cach_tot_nhat

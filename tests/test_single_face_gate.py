@@ -40,6 +40,9 @@ def mock_engine() -> RecognitionEngine:
         ]
         mock_svc = MagicMock()
         engine = RecognitionEngine(session_id=1, require_blink=False, attendance_service=mock_svc)
+        # Unit test này tập trung vào single-face/temporal gate; liveness đã có
+        # test riêng nên mock bằng chứng blink để không tạo attendance thật.
+        engine.update_blink = MagicMock(return_value=True)
         return engine
 
 

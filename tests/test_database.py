@@ -79,10 +79,11 @@ def test_expired_embedding_is_removed(tmp_path, monkeypatch) -> None:
 
     assert deleted == 1
     with database.get_connection() as connection:
-        active = connection.execute(
-            "SELECT active FROM students WHERE id = ?", (student_id,)
-        ).fetchone()["active"]
-    assert active == 0
+        row = connection.execute(
+            "SELECT active, consent_status FROM students WHERE id = ?", (student_id,)
+        ).fetchone()
+    assert row["active"] == 1
+    assert row["consent_status"] == "pending"
 
 
 def test_attendance_report_handles_absent_students(tmp_path, monkeypatch) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -42,6 +43,23 @@ class RecognitionDecision:
     stable_duration_ms: int = DEFAULT_RECOGNITION_POLICY.stable_duration_ms
     liveness_policy: str = DEFAULT_RECOGNITION_POLICY.liveness_policy
     recognition_policy_hash: str = DEFAULT_RECOGNITION_POLICY.policy_hash
+
+    def __post_init__(self) -> None:
+        """Bảo vệ DTO khỏi evidence hình học không nhất quán."""
+        numeric_values = (self.distance, self.second_distance, self.margin)
+        if not all(math.isfinite(value) and value >= 0 for value in numeric_values):
+            raise ValueError("Distance, second_distance và margin phải là số hữu hạn không âm.")
+        if self.second_distance < self.distance:
+            raise ValueError("Top-2 distance không được nhỏ hơn Top-1 distance.")
+        if not math.isclose(
+            self.margin,
+            self.second_distance - self.distance,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            raise ValueError("Margin phải bằng second_distance trừ distance.")
+        if self.confirmation_frames < 1 or self.stable_duration_ms < 0:
+            raise ValueError("Temporal evidence không hợp lệ.")
 
     def to_dict(self) -> dict[str, Any]:
         """Chuyển đổi sang dict định dạng JSON thân thiện."""

@@ -242,6 +242,22 @@ def init_database() -> None:
             if col_name not in student_columns:
                 connection.execute(f"ALTER TABLE students ADD COLUMN {col_name} {col_type}")
 
+        # DB cũ chưa có trạng thái consent: khôi phục các profile đã từng có
+        # consent và embedding, nhưng không tự tạo consent cho profile rỗng.
+        connection.execute(
+            """
+            UPDATE students
+            SET consent_status = 'granted',
+                consent_policy_version = COALESCE(consent_policy_version, ?)
+            WHERE consent_status = 'pending'
+              AND consent_at_utc IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM face_embeddings fe WHERE fe.student_id = students.id
+              )
+            """,
+            (config.BIOMETRIC_CONSENT_POLICY_VERSION,),
+        )
+
         embedding_columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(face_embeddings)").fetchall()
@@ -385,7 +401,7 @@ def upsert_student(
         raise ValueError("Không thể tạo/cập nhật hồ sơ khi chưa có consent rõ ràng.")
 
     now = utc_iso()
-    policy_version = consent_policy_version or DEFAULT_RECOGNITION_POLICY.policy_version
+    policy_version = consent_policy_version or config.BIOMETRIC_CONSENT_POLICY_VERSION
     with get_connection() as connection:
         existing = connection.execute(
             "SELECT id FROM students WHERE student_code = ?", (code,)
@@ -561,23 +577,21 @@ def get_student_by_code(student_code: str) -> sqlite3.Row | None:
 
 def has_granted_biometric_consent(
     student_id: int,
-    policy_version: str | None = None,
 ) -> bool:
-    """Kiểm tra consent hiện tại trước khi ghi nhận attendance sinh trắc học."""
-    query = """
-        SELECT 1
-        FROM students
-        WHERE id = ?
-          AND active = 1
-          AND consent_status = 'granted'
-          AND consent_at_utc IS NOT NULL
-    """
-    params: list[Any] = [student_id]
-    if policy_version is not None:
-        query += " AND consent_policy_version = ?"
-        params.append(policy_version)
+    """Kiểm tra consent hiện tại, độc lập với phiên bản thuật toán nhận diện."""
     with get_connection() as connection:
-        return connection.execute(query, params).fetchone() is not None
+        return (
+            connection.execute(
+                """
+                SELECT 1 FROM students
+                WHERE id = ? AND active = 1
+                  AND consent_status = 'granted'
+                  AND consent_at_utc IS NOT NULL
+                """,
+                (student_id,),
+            ).fetchone()
+            is not None
+        )
 
 
 def get_student_embeddings(
@@ -595,7 +609,6 @@ def get_student_embeddings(
             WHERE fe.student_id = ?
               AND st.active = 1
               AND st.consent_status = 'granted'
-              AND st.consent_policy_version = ?
               AND fe.revoked_at_utc IS NULL
               AND fe.embedding_dim = ?
               AND fe.embedding_model = ?
@@ -604,7 +617,6 @@ def get_student_embeddings(
             """,
             (
                 student_id,
-                selected_policy.policy_version,
                 selected_policy.embedding_dimension,
                 selected_policy.embedding_model,
                 selected_policy.embedding_model_version,
@@ -621,13 +633,19 @@ def get_student_embeddings(
 def remove_student_biometrics(
     student_id: int, audit_event: str = "student_biometrics_removed"
 ) -> None:
-    """Xóa vector khuôn mặt và vô hiệu hóa sinh viên.
+    """Xóa vector khuôn mặt và thu hồi consent, nhưng giữ hồ sơ học vụ hoạt động.
 
     Args:
         student_id (int): ID của sinh viên cần thu hồi dữ liệu.
         audit_event (str): Tên sự kiện ghi vào audit log.
     """
+    now = utc_iso()
     with get_connection() as connection:
+        if (
+            connection.execute("SELECT 1 FROM students WHERE id = ?", (student_id,)).fetchone()
+            is None
+        ):
+            raise ValueError("Không tìm thấy sinh viên.")
         connection.execute("DELETE FROM face_embeddings WHERE student_id = ?", (student_id,))
         connection.execute(
             """
@@ -635,15 +653,15 @@ def remove_student_biometrics(
             SET status = 'revoked', revoked_at_utc = ?
             WHERE student_id = ? AND status = 'granted'
             """,
-            (utc_iso(), student_id),
+            (now, student_id),
         )
         connection.execute(
             """
             UPDATE students
-            SET active = 0, consent_status = 'revoked', updated_at_utc = ?
+            SET consent_at_utc = NULL, consent_status = 'revoked', updated_at_utc = ?
             WHERE id = ?
             """,
-            (utc_iso(), student_id),
+            (now, student_id),
         )
         audit(connection, audit_event, f"student_id={student_id}")
 
@@ -651,41 +669,20 @@ def remove_student_biometrics(
 def revoke_student_consent(student_id: int) -> None:
     """Rút lại quyền sử dụng dữ liệu sinh trắc học của sinh viên.
 
-    Hành động:
-    1. Xóa toàn bộ vector đặc trưng khuôn mặt khỏi face_embeddings.
-    2. Chuyển sinh viên sang trạng thái active = 0.
-    3. Ghi audit log 'consent_revoked'.
-    4. Giữ nguyên lịch sử các bản ghi điểm danh quá khứ (không xóa bảng attendance).
+    Hành động: xóa vector, thu hồi consent và giữ nguyên hồ sơ học vụ cùng
+    lịch sử điểm danh; ``active`` không phải là trạng thái consent.
 
     Args:
         student_id (int): ID sinh viên.
     """
-    now = utc_iso()
-    with get_connection() as connection:
-        connection.execute("DELETE FROM face_embeddings WHERE student_id = ?", (student_id,))
-        connection.execute(
-            """
-            UPDATE biometric_consents
-            SET status = 'revoked', revoked_at_utc = ?
-            WHERE student_id = ? AND status = 'granted'
-            """,
-            (now, student_id),
-        )
-        connection.execute(
-            """
-            UPDATE students
-            SET active = 0, consent_status = 'revoked', updated_at_utc = ?
-            WHERE id = ?
-            """,
-            (now, student_id),
-        )
-        audit(connection, "consent_revoked", f"student_id={student_id}")
+    remove_student_biometrics(student_id, audit_event="consent_revoked")
 
 
 def purge_expired_biometrics(retention_days: int = BIOMETRIC_RETENTION_DAYS) -> int:
     """Xóa vector khuôn mặt đã hết thời hạn lưu trữ.
 
-    Sinh viên không còn vector tham chiếu sẽ được chuyển sang trạng thái không hoạt động.
+    Sinh viên hết hạn embedding được chuyển về ``pending`` để phải đăng ký lại
+    trước khi xử lý ảnh; trạng thái học vụ ``active`` vẫn được giữ nguyên.
 
     Args:
         retention_days: Số ngày lưu tối đa, mặc định đọc từ cấu hình.
@@ -697,32 +694,37 @@ def purge_expired_biometrics(retention_days: int = BIOMETRIC_RETENTION_DAYS) -> 
         raise ValueError("Thời hạn lưu trữ phải nằm trong khoảng 1-3650 ngày.")
     cutoff = utc_iso(utc_now() - timedelta(days=retention_days))
     with get_connection() as connection:
+        expired_rows = connection.execute(
+            "SELECT DISTINCT student_id FROM face_embeddings WHERE created_at_utc < ?",
+            (cutoff,),
+        ).fetchall()
+        expired_student_ids = [int(row["student_id"]) for row in expired_rows]
         cursor = connection.execute(
             "DELETE FROM face_embeddings WHERE created_at_utc < ?", (cutoff,)
         )
         deleted = max(0, int(cursor.rowcount))
-        connection.execute(
-            """
-            UPDATE students
-            SET active = 0, consent_status = 'revoked', updated_at_utc = ?
-            WHERE active = 1
-              AND NOT EXISTS (
-                  SELECT 1 FROM face_embeddings fe WHERE fe.student_id = students.id
-              )
-            """,
-            (utc_iso(),),
-        )
-        connection.execute(
-            """
-            UPDATE biometric_consents
-            SET status = 'revoked', revoked_at_utc = ?
-            WHERE status = 'granted'
-              AND student_id IN (
-                  SELECT id FROM students WHERE consent_status = 'revoked'
-              )
-            """,
-            (utc_iso(),),
-        )
+        now = utc_iso()
+        if expired_student_ids:
+            placeholders = ",".join("?" for _ in expired_student_ids)
+            connection.execute(
+                f"""
+                UPDATE students
+                SET consent_at_utc = NULL, consent_status = 'pending', updated_at_utc = ?
+                WHERE id IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM face_embeddings fe WHERE fe.student_id = students.id
+                  )
+                """,
+                [now, *expired_student_ids],
+            )
+            connection.execute(
+                f"""
+                UPDATE biometric_consents
+                SET status = 'revoked', revoked_at_utc = ?
+                WHERE status = 'granted' AND student_id IN ({placeholders})
+                """,
+                [now, *expired_student_ids],
+            )
         audit(connection, "expired_biometrics_purged", f"deleted={deleted}")
         return deleted
 
@@ -1112,8 +1114,12 @@ def manual_attendance_correction(
     """
     if new_status not in {"present", "late", "absent"}:
         return False, "Trạng thái mới không hợp lệ ('present', 'late', 'absent')."
-    if not reason.strip():
-        return False, "Cần cung cấp lý do điều chỉnh điểm danh."
+    lecturer = " ".join(lecturer_id.strip().split())
+    note = " ".join(reason.strip().split())
+    if not 1 <= len(lecturer) <= 120:
+        return False, "Định danh giảng viên phải dài từ 1 đến 120 ký tự."
+    if not 3 <= len(note) <= 500:
+        return False, "Lý do điều chỉnh phải dài từ 3 đến 500 ký tự."
 
     now = utc_now()
     now_iso = utc_iso(now)
@@ -1121,11 +1127,17 @@ def manual_attendance_correction(
     try:
         connection.execute("BEGIN IMMEDIATE")
         student = connection.execute(
-            "SELECT student_code, full_name FROM students WHERE id = ?", (student_id,)
+            """
+            SELECT st.student_code, st.full_name
+            FROM students st
+            JOIN session_enrollments se ON se.student_id = st.id
+            WHERE st.id = ? AND se.session_id = ?
+            """,
+            (student_id, session_id),
         ).fetchone()
         if student is None:
             connection.rollback()
-            return False, "Không tìm thấy sinh viên."
+            return False, "Sinh viên không thuộc snapshot của buổi học."
 
         existing = connection.execute(
             "SELECT id, attendance_status FROM attendance WHERE session_id = ? AND student_id = ?",
@@ -1150,8 +1162,8 @@ def manual_attendance_correction(
                     orig_status,
                     new_status,
                     new_status,
-                    lecturer_id,
-                    reason.strip(),
+                    lecturer,
+                    note,
                     now_iso,
                     existing["id"],
                 ),
@@ -1163,9 +1175,17 @@ def manual_attendance_correction(
                 INSERT INTO attendance(
                     session_id, student_id, check_in_at_utc, attendance_status,
                     recognition_distance, threshold_used, source,
+                    identity_margin, margin_threshold, liveness_policy,
+                    recognition_policy_version, confirmation_frames,
+                    stable_duration_ms, aggregation_strategy,
+                    embedding_model_version,
                     original_status, final_status, corrected_by,
                     correction_reason, corrected_at_utc
-                ) VALUES (?, ?, ?, ?, 0.0, 0.50, 'manual', 'none', ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, 0.0, 0.0, 'manual', 0.0, 0.0,
+                    'not_applicable', 'manual', 0, 0, 'not_applicable',
+                    'not_applicable', 'absent', ?, ?, ?, ?
+                )
                 """,
                 (
                     session_id,
@@ -1173,8 +1193,8 @@ def manual_attendance_correction(
                     now_iso,
                     new_status,
                     new_status,
-                    lecturer_id,
-                    reason.strip(),
+                    lecturer,
+                    note,
                     now_iso,
                 ),
             )
@@ -1182,7 +1202,7 @@ def manual_attendance_correction(
         audit(
             connection,
             "attendance_manual_corrected",
-            f"session={session_id},student={student_id},status={new_status},by={lecturer_id},reason={reason.strip()}",
+            f"session={session_id},student={student_id},status={new_status},by={lecturer},reason={note}",
         )
         connection.commit()
         return True, f"Đã cập nhật trạng thái {student['student_code']} thành '{new_status}'."

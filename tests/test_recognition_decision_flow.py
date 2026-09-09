@@ -30,7 +30,7 @@ def setup_attendance_env(tmp_path, monkeypatch):
         "Nguyễn Văn An",
         "K23",
         consent_given=True,
-        consent_policy_version="face-policy-v1",
+        consent_policy_version="biometric-consent-v1",
     )
     student_id = int(student["id"])
     database.create_course("CS101", "Nhập môn lập trình", "Trần Văn Bình")
@@ -120,7 +120,7 @@ def test_biometric_attendance_liveness_rejected(setup_attendance_env) -> None:
         second_distance=0.55,
         margin=0.23,
         liveness_passed=False,
-        confirmation_frames=2,
+        confirmation_frames=3,
         policy_version="face-policy-v1",
         timestamp_utc=utc_iso(),
     )
@@ -154,6 +154,12 @@ def test_biometric_attendance_session_closed(setup_attendance_env) -> None:
 def test_biometric_attendance_consent_revoked(setup_attendance_env) -> None:
     student_id, session_id = setup_attendance_env
     database.revoke_student_consent(student_id)
+    with database.get_connection() as connection:
+        student = connection.execute(
+            "SELECT active, consent_status FROM students WHERE id = ?", (student_id,)
+        ).fetchone()
+    assert student["active"] == 1
+    assert student["consent_status"] == "revoked"
 
     decision = RecognitionDecision(
         student_id=student_id,
@@ -267,3 +273,17 @@ def test_manual_attendance_correction_audit(setup_attendance_env) -> None:
         assert row["corrected_by"] == "GV_HOANG"
         assert row["correction_reason"] == "Sinh viên vi phạm quy chế thi"
         assert row["corrected_at_utc"] is not None
+
+
+def test_manual_attendance_requires_session_roster(setup_attendance_env) -> None:
+    _, session_id = setup_attendance_env
+    student = database.upsert_student("SV002", "Trần Thị B", "K23")
+
+    with pytest.raises(ValueError, match="không thuộc snapshot"):
+        record_manual_attendance(
+            session_id=session_id,
+            student_id=int(student["id"]),
+            status="present",
+            lecturer_id="GV_HOANG",
+            reason="Bổ sung theo biên bản lớp",
+        )

@@ -46,6 +46,7 @@ def record_biometric_attendance(
         aggregation_strategy=decision.aggregation_strategy,
         embedding_model=decision.embedding_model,
         embedding_model_version=decision.embedding_model_version,
+        confirmation_frames=decision.confirmation_frames,
         stable_duration_ms=decision.stable_duration_ms,
         liveness_policy=decision.liveness_policy,
         recognition_policy_hash=decision.recognition_policy_hash,
@@ -68,7 +69,7 @@ def record_biometric_attendance(
             recognition_policy_hash=decision.recognition_policy_hash,
         )
 
-    if not has_granted_biometric_consent(decision.student_id, decision.policy_version):
+    if not has_granted_biometric_consent(decision.student_id):
         log_recognition_attempt(
             session_id,
             "rejected",
@@ -288,129 +289,9 @@ def record_manual_attendance(
         margin=None,
         source="manual",
         policy_version="manual",
+        distance_threshold=0.0,
+        margin_threshold=0.0,
+        aggregation_strategy="not_applicable",
+        embedding_model_version="not_applicable",
+        stable_duration_ms=0,
     )
-
-
-def process_attendance_record(
-    session_id: int,
-    student_id: int,
-    distance: float,
-    tolerance: float = DEFAULT_RECOGNITION_POLICY.distance_threshold,
-    liveness_passed: bool = True,
-    margin: float = DEFAULT_RECOGNITION_POLICY.identity_margin,
-    source: str = "face_webrtc",
-) -> AttendanceResult:
-    """Xử lý yêu cầu điểm danh cho sinh viên và trả về kết quả cấu trúc chuẩn hóa.
-
-    Args:
-        session_id: ID buổi học.
-        student_id: ID sinh viên trong DB.
-        distance: Khoảng cách Euclidean L2 nhận diện được.
-        tolerance: Tham số tương thích client cũ, không còn được sử dụng.
-        liveness_passed: Trạng thái liveness đã qua kiểm tra.
-        margin: Độ phân biệt margin.
-        source: Nguồn điểm danh.
-
-    Returns:
-        AttendanceResult: Đối tượng kết quả điểm danh chuẩn hóa.
-
-    Raises:
-        DuplicateAttendanceError: Nếu sinh viên đã được điểm danh trước đó.
-        SessionClosedError: Nếu buổi học đã đóng hoặc ngoài giờ.
-        StudentNotInRosterError: Nếu sinh viên không thuộc danh sách lớp của buổi học.
-    """
-    now_str = utc_iso()
-    effective_tolerance = DEFAULT_RECOGNITION_POLICY.distance_threshold
-    if not liveness_passed:
-        return build_rejected_result(
-            reason=RejectionReason.LIVENESS_FAILED,
-            recognized_at=now_str,
-            student_id=str(student_id),
-            distance=distance,
-            liveness_passed=False,
-            tolerance=effective_tolerance,
-            margin=margin,
-            source=source,
-            policy_version=DEFAULT_RECOGNITION_POLICY.policy_version,
-            distance_threshold=effective_tolerance,
-            margin_threshold=DEFAULT_RECOGNITION_POLICY.identity_margin,
-            aggregation_strategy=DEFAULT_RECOGNITION_POLICY.aggregation_strategy,
-            embedding_model_version=DEFAULT_RECOGNITION_POLICY.embedding_model_version,
-            stable_duration_ms=0,
-            recognition_policy_hash=DEFAULT_RECOGNITION_POLICY.policy_hash,
-        )
-    if source == "face_webrtc" and not has_granted_biometric_consent(
-        student_id, DEFAULT_RECOGNITION_POLICY.policy_version
-    ):
-        return build_rejected_result(
-            reason=RejectionReason.NO_CONSENT,
-            recognized_at=now_str,
-            student_id=str(student_id),
-            distance=distance,
-            liveness_passed=True,
-            tolerance=effective_tolerance,
-            margin=margin,
-            source=source,
-            policy_version=DEFAULT_RECOGNITION_POLICY.policy_version,
-            distance_threshold=effective_tolerance,
-            margin_threshold=DEFAULT_RECOGNITION_POLICY.identity_margin,
-            aggregation_strategy=DEFAULT_RECOGNITION_POLICY.aggregation_strategy,
-            embedding_model_version=DEFAULT_RECOGNITION_POLICY.embedding_model_version,
-            stable_duration_ms=0,
-            recognition_policy_hash=DEFAULT_RECOGNITION_POLICY.policy_hash,
-        )
-    if margin < DEFAULT_RECOGNITION_POLICY.identity_margin:
-        return build_rejected_result(
-            reason=RejectionReason.AMBIGUOUS_MATCH,
-            recognized_at=now_str,
-            student_id=str(student_id),
-            distance=distance,
-            liveness_passed=liveness_passed,
-            tolerance=effective_tolerance,
-            margin=margin,
-            source=source,
-            policy_version=DEFAULT_RECOGNITION_POLICY.policy_version,
-            distance_threshold=effective_tolerance,
-            margin_threshold=DEFAULT_RECOGNITION_POLICY.identity_margin,
-            aggregation_strategy=DEFAULT_RECOGNITION_POLICY.aggregation_strategy,
-            embedding_model_version=DEFAULT_RECOGNITION_POLICY.embedding_model_version,
-            stable_duration_ms=0,
-            recognition_policy_hash=DEFAULT_RECOGNITION_POLICY.policy_hash,
-        )
-    result_code, message = mark_attendance(
-        session_id=session_id,
-        student_id=student_id,
-        distance=distance,
-        identity_margin=margin,
-        source=source,
-        tolerance=effective_tolerance,
-    )
-
-    if result_code == "created":
-        status = "late" if "ĐI TRỄ" in message else "present"
-        return build_accepted_result(
-            student_id=str(student_id),
-            status=status,
-            distance=distance,
-            liveness_passed=liveness_passed,
-            recognized_at=now_str,
-            tolerance=effective_tolerance,
-            margin=margin,
-            source=source,
-        )
-    elif result_code == "already":
-        raise DuplicateAttendanceError(message)
-    elif result_code in {"closed", "outside"}:
-        raise SessionClosedError(message)
-    elif result_code in {"not_in_roster", "inactive"}:
-        raise StudentNotInRosterError(message)
-    else:
-        return build_rejected_result(
-            reason=RejectionReason.UNKNOWN_FACE,
-            recognized_at=now_str,
-            student_id=str(student_id),
-            distance=distance,
-            tolerance=effective_tolerance,
-            margin=margin,
-            source=source,
-        )

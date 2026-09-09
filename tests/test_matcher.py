@@ -74,3 +74,11 @@ def test_matcher_boundary_thresholds() -> None:
     sample_larger = Mau(1, np.full(128, val_larger))
     res_larger = tim_danh_tinh_tot_nhat(query, [sample_larger], 0.50, 0.0)
     assert res_larger.mau is None
+
+
+def test_matcher_single_identity_serializes_finite_margin() -> None:
+    result = tim_danh_tinh_tot_nhat(np.zeros(128), [Mau(1, np.zeros(128))], 0.5, 0.05)
+
+    assert result.mau is not None
+    assert np.isfinite(result.khoang_cach_thu_hai)
+    assert result.do_phan_biet == 0.05

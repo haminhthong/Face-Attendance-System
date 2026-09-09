@@ -117,12 +117,6 @@ def render_attendance_page() -> None:
     session_options = {session_label(row): row for row in open_sessions}
     selected_label = st.selectbox("Chọn buổi học", list(session_options))
     selected = session_options[selected_label]
-    require_blink = st.checkbox(
-        "Yêu cầu chớp mắt trước khi điểm danh",
-        value=True,
-        help="Đây là bước kiểm tra người thật cơ bản, không chống được mọi hình thức giả mạo.",
-    )
-
     templates = load_templates(int(selected["id"]))
     unique_students = len({item.student_id for item in templates})
     col_a, col_b, col_c = st.columns(3)
@@ -139,9 +133,11 @@ def render_attendance_page() -> None:
         "Mỗi sinh viên chỉ được ghi một lần trong buổi học."
     )
 
-    engine = RecognitionEngine(int(selected["id"]), require_blink)
+    # Liveness chớp mắt là một phần bắt buộc của policy, không cho tắt riêng
+    # ở giao diện vì điều đó sẽ làm bằng chứng nhận diện không còn trung thực.
+    engine = RecognitionEngine(int(selected["id"]), require_blink=True)
     context = webrtc_streamer(
-        key=f"attendance-{selected['id']}-blink-{int(require_blink)}",
+        key=f"attendance-{selected['id']}-blink",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=lambda: AttendanceVideoProcessor(engine),
         media_stream_constraints={
@@ -221,11 +217,13 @@ def render_student_management() -> None:
         }
         selected_label = st.selectbox("Chọn sinh viên cần thu hồi dữ liệu", list(option_map))
         confirm_delete = st.checkbox(
-            "Tôi xác nhận xóa toàn bộ vector khuôn mặt và vô hiệu hóa sinh viên này"
+            "Tôi xác nhận xóa toàn bộ vector khuôn mặt và thu hồi consent sinh trắc học"
         )
         if st.button("Thu hồi dữ liệu khuôn mặt", disabled=not confirm_delete):
             remove_student_biometrics(option_map[selected_label])
-            st.success("Đã thu hồi dữ liệu khuôn mặt.")
+            st.success(
+                "Đã thu hồi dữ liệu khuôn mặt; hồ sơ học vụ và lịch sử điểm danh vẫn được giữ."
+            )
             st.rerun()
 
 

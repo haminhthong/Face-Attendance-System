@@ -9,6 +9,30 @@ from face_attendance.utils import utc_now
 app = api.app
 
 
+def biometric_payload(session_id: int, student_id: int) -> dict[str, object]:
+    policy = config.RECOGNITION_POLICY
+    return {
+        "session_id": session_id,
+        "student_id": student_id,
+        "student_code": "SV001",
+        "full_name": "Nguyen Van A",
+        "distance": 0.35,
+        "second_distance": 0.60,
+        "margin": 0.25,
+        "liveness_passed": True,
+        "confirmation_frames": policy.minimum_observations,
+        "policy_version": policy.policy_version,
+        "distance_threshold": policy.distance_threshold,
+        "margin_threshold": policy.identity_margin,
+        "aggregation_strategy": policy.aggregation_strategy,
+        "embedding_model": policy.embedding_model,
+        "embedding_model_version": policy.embedding_model_version,
+        "stable_duration_ms": policy.stable_duration_ms,
+        "liveness_policy": policy.liveness_policy,
+        "recognition_policy_hash": policy.policy_hash,
+    }
+
+
 def test_health() -> None:
     with TestClient(app) as client:
         response = client.get("/health")
@@ -19,10 +43,7 @@ def test_health() -> None:
 def test_attendance_write_is_disabled_without_api_key(monkeypatch) -> None:
     monkeypatch.setattr(api, "API_KEY", "")
     with TestClient(app) as client:
-        response = client.post(
-            "/attendance",
-            json={"session_id": 1, "student_id": 1, "recognition_distance": 0.4},
-        )
+        response = client.get("/policy")
     assert response.status_code == 503
 
 
@@ -40,20 +61,26 @@ def test_sessions_requires_valid_api_key(monkeypatch) -> None:
 def test_attendance_payload_validation(monkeypatch) -> None:
     monkeypatch.setattr(api, "API_KEY", "secret-key")
     with TestClient(app) as client:
-        # Thiếu session_id
+        # Thiếu toàn bộ bằng chứng bắt buộc của pipeline biometric.
         res1 = client.post(
-            "/attendance",
+            "/attendance/biometric",
             headers={"X-API-Key": "secret-key"},
-            json={"student_id": 1, "recognition_distance": 0.4},
+            json={"student_id": 1},
         )
-        # Sai kiểu dữ liệu student_id
+        # Sai kiểu dữ liệu student_id.
         res2 = client.post(
-            "/attendance",
+            "/attendance/biometric",
             headers={"X-API-Key": "secret-key"},
-            json={"session_id": 1, "student_id": "not-an-int", "recognition_distance": 0.4},
+            json={**biometric_payload(1, 1), "student_id": "not-an-int"},
+        )
+        res3 = client.post(
+            "/attendance/biometric",
+            headers={"X-API-Key": "secret-key"},
+            json={**biometric_payload(1, 1), "margin": 0.01},
         )
     assert res1.status_code == 422
     assert res2.status_code == 422
+    assert res3.status_code == 422
 
 
 def test_attendance_success_structured_response(monkeypatch, tmp_path) -> None:
@@ -67,7 +94,7 @@ def test_attendance_success_structured_response(monkeypatch, tmp_path) -> None:
         "Nguyen Van A",
         "12A1",
         consent_given=True,
-        consent_policy_version="face-policy-v1",
+        consent_policy_version="biometric-consent-v1",
     )
     student_id = int(student["id"])
     database.save_embedding(student_id, np.zeros(128), "hash_img", 100.0, 100.0, 150, 150)
@@ -84,9 +111,9 @@ def test_attendance_success_structured_response(monkeypatch, tmp_path) -> None:
 
     with TestClient(app) as client:
         res = client.post(
-            "/attendance",
+            "/attendance/biometric",
             headers={"X-API-Key": "secret-key"},
-            json={"session_id": session_id, "student_id": student_id, "recognition_distance": 0.35},
+            json=biometric_payload(session_id, student_id),
         )
     assert res.status_code == 200
     data = res.json()
@@ -103,13 +130,13 @@ def test_unhandled_exception_does_not_leak_stacktrace(monkeypatch) -> None:
     def mock_broken_service(*args, **kwargs):
         raise RuntimeError("Internal DB crashed on line 123 in /var/internal/db.py")
 
-    monkeypatch.setattr(api, "process_attendance_record", mock_broken_service)
+    monkeypatch.setattr(api, "record_biometric_attendance", mock_broken_service)
 
     with TestClient(app, raise_server_exceptions=False) as client:
         res = client.post(
-            "/attendance",
+            "/attendance/biometric",
             headers={"X-API-Key": "secret-key"},
-            json={"session_id": 1, "student_id": 1, "recognition_distance": 0.35},
+            json=biometric_payload(1, 1),
         )
     assert res.status_code == 500
     body = res.json()

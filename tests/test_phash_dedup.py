@@ -66,7 +66,9 @@ def test_enroll_student_images_filters_near_duplicates() -> None:
         patch("face_attendance.recognition.upsert_student", return_value={"id": 1}),
         patch("face_attendance.recognition.save_embedding", return_value=True),
     ):
-        saved, warnings = enroll_student_images("SV001", "Nguyễn Văn A", "K23", [up1, up2])
+        saved, warnings = enroll_student_images(
+            "SV001", "Nguyễn Văn A", "K23", [up1, up2], consent_given=True
+        )
 
     # Chỉ 1 ảnh được lưu, ảnh thứ 2 bị bỏ qua do trùng byte / near-duplicate
     assert saved == 1

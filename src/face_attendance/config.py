@@ -6,12 +6,30 @@ ngưỡng kiểm tra chất lượng ảnh, cấu hình liveness và quy tắc k
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .policy import DEFAULT_RECOGNITION_POLICY, RecognitionPolicy
+# Nạp .env nếu thư viện có sẵn. Dependency này được khai báo trong pyproject,
+# nhưng fallback giúp các module cấu hình vẫn có thể được import trong môi trường
+# tối giản dùng cho kiểm thử database.
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+
+def _load_project_env() -> None:
+    """Nạp biến môi trường từ file .env ở thư mục gốc dự án."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(BASE_DIR / ".env", override=False)
+
+
+_load_project_env()
+
+from .policy import DEFAULT_RECOGNITION_POLICY, RecognitionPolicy  # noqa: E402
 
 # Thông tin cơ bản ứng dụng & Bảo mật API
 APP_TITLE = "Hệ thống Điểm danh Sinh viên bằng Khuôn mặt"
@@ -27,7 +45,6 @@ if APP_ENV == "production":
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 # Đường dẫn lưu trữ dữ liệu ứng dụng & SQLite database
-BASE_DIR = Path(__file__).resolve().parents[2]
 custom_db = os.getenv("DATABASE_PATH", "").strip()
 if custom_db:
     DB_PATH = Path(custom_db).expanduser().resolve()
@@ -87,6 +104,23 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return value
 
 
+# Phiên bản văn bản consent là metadata pháp lý, không phải phiên bản thuật toán.
+# Hai giá trị này không được so sánh chéo trong pipeline nhận diện.
+BIOMETRIC_CONSENT_POLICY_VERSION = os.getenv(
+    "BIOMETRIC_CONSENT_POLICY_VERSION", "biometric-consent-v1"
+).strip()
+if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", BIOMETRIC_CONSENT_POLICY_VERSION):
+    raise RuntimeError("BIOMETRIC_CONSENT_POLICY_VERSION có định dạng không hợp lệ.")
+
+# Cấu hình ghi log và kích thước file upload phải được đọc từ cùng một nguồn
+# với .env.example; không để giá trị hard-code làm lệch tài liệu triển khai.
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+if LOG_LEVEL not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+    raise RuntimeError("LOG_LEVEL phải là DEBUG, INFO, WARNING, ERROR hoặc CRITICAL.")
+logging.basicConfig(level=LOG_LEVEL, format="%(levelname)s: %(message)s")
+MAX_UPLOAD_SIZE_MB = _env_int("MAX_UPLOAD_SIZE_MB", 8, 1, 50)
+
+
 # Chính sách nhận diện là nguồn sự thật duy nhất.
 # Hai hằng số cũ được giữ lại để không làm hỏng client cũ; code mới không tự
 # đọc threshold từ environment ở từng module nữa.
@@ -106,7 +140,7 @@ PROCESS_EVERY_N_FRAMES = _env_int("PROCESS_EVERY_N_FRAMES", 3, 1, 60)
 CONFIRMATION_FRAMES = RECOGNITION_POLICY.minimum_observations
 
 # Cấu hình kiểm tra chất lượng ảnh đầu vào (Quality Control)
-MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # Giới hạn kích thước file 8MB
+MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 MIN_FACE_SIZE_PX = 100  # Độ phân giải khuôn mặt tối thiểu (px)
 MIN_BLUR_SCORE = 45.0  # Ngưỡng biến thiên Laplacian tối thiểu (chống mờ)
 MIN_BRIGHTNESS = 40.0  # Ngưỡng độ sáng trung bình tối thiểu

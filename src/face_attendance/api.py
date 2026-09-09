@@ -4,7 +4,7 @@ Cung cấp các endpoint tích hợp dịch vụ:
 - Health check kiểm tra trạng thái hoạt động (/health).
 - Danh sách buổi học (/sessions).
 - Báo cáo kết quả điểm danh (/sessions/{session_id}/attendance).
-- Ghi nhận điểm danh (/attendance).
+- Ghi nhận biometric/manual attendance với application service.
 
 Bảo mật bằng Header X-API-Key với cơ chế so sánh hằng số thời gian secrets.compare_digest chống Timing Attack.
 """
@@ -12,9 +12,10 @@ Bảo mật bằng Header X-API-Key với cơ chế so sánh hằng số thời 
 from __future__ import annotations
 
 import logging
+import math
 import secrets
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -22,11 +23,10 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .application import (
-    process_attendance_record,
     record_biometric_attendance,
     record_manual_attendance,
 )
-from .config import API_KEY, FACE_TOLERANCE, RECOGNITION_POLICY
+from .config import API_KEY, RECOGNITION_POLICY
 from .database import (
     attendance_report,
     init_database,
@@ -72,41 +72,27 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
-class YeuCauDiemDanh(BaseModel):
-    """Schema Pydantic cho yêu cầu điểm danh tương thích với client cũ."""
-
-    session_id: int = Field(gt=0, description="ID của buổi học đang mở điểm danh")
-    student_id: int = Field(gt=0, description="ID sinh viên được nhận diện")
-    recognition_distance: float = Field(
-        ge=0.0, le=2.0, description="Khoảng cách khuôn mặt Euclidean L2"
-    )
-
-
 class YeuCauDiemDanhBiometric(BaseModel):
     """Schema cho quyết định nhận diện sinh trắc học có đầy đủ bằng chứng kiểm định."""
 
     session_id: int = Field(gt=0, description="ID của buổi học đang mở điểm danh")
     student_id: int = Field(gt=0, description="ID sinh viên được nhận diện")
-    student_code: str = Field(description="Mã sinh viên")
-    full_name: str = Field(default="", description="Họ tên sinh viên")
+    student_code: str = Field(min_length=3, max_length=30, description="Mã sinh viên")
+    full_name: str = Field(default="", max_length=120, description="Họ tên sinh viên")
     distance: float = Field(ge=0.0, le=2.0, description="Khoảng cách khuôn mặt Euclidean L2")
-    second_distance: float = Field(default=2.0, description="Khoảng cách ứng viên Top-2")
+    second_distance: float = Field(ge=0.0, description="Khoảng cách ứng viên Top-2")
     margin: float = Field(ge=0.0, description="Chênh lệch giữa Top-1 và Top-2 (Margin)")
     liveness_passed: bool = Field(description="Bằng chứng kiểm tra liveness thành công")
-    confirmation_frames: int = Field(
-        default=3, ge=1, description="Số khung hình nhận diện liên tiếp hợp lệ"
-    )
-    policy_version: str = Field(
-        default=RECOGNITION_POLICY.policy_version, description="Phiên bản chính sách"
-    )
-    distance_threshold: float = Field(default=RECOGNITION_POLICY.distance_threshold, ge=0.0, le=2.0)
-    margin_threshold: float = Field(default=RECOGNITION_POLICY.identity_margin, ge=0.0, le=2.0)
-    aggregation_strategy: str = Field(default=RECOGNITION_POLICY.aggregation_strategy)
-    embedding_model: str = Field(default=RECOGNITION_POLICY.embedding_model)
-    embedding_model_version: str = Field(default=RECOGNITION_POLICY.embedding_model_version)
-    stable_duration_ms: int = Field(default=RECOGNITION_POLICY.stable_duration_ms, ge=0)
-    liveness_policy: str = Field(default=RECOGNITION_POLICY.liveness_policy)
-    recognition_policy_hash: str = Field(default=RECOGNITION_POLICY.policy_hash)
+    confirmation_frames: int = Field(ge=1, description="Số khung hình nhận diện liên tiếp hợp lệ")
+    policy_version: str = Field(min_length=1, max_length=64, description="Phiên bản chính sách")
+    distance_threshold: float = Field(ge=0.0, le=2.0)
+    margin_threshold: float = Field(ge=0.0, le=2.0)
+    aggregation_strategy: str = Field(min_length=1, max_length=64)
+    embedding_model: str = Field(min_length=1, max_length=120)
+    embedding_model_version: str = Field(min_length=1, max_length=64)
+    stable_duration_ms: int = Field(ge=0)
+    liveness_policy: str = Field(min_length=1, max_length=64)
+    recognition_policy_hash: str = Field(min_length=64, max_length=64)
 
 
 class YeuCauDiemDanhManual(BaseModel):
@@ -114,9 +100,11 @@ class YeuCauDiemDanhManual(BaseModel):
 
     session_id: int = Field(gt=0, description="ID của buổi học")
     student_id: int = Field(gt=0, description="ID sinh viên")
-    status: str = Field(description="Trạng thái điểm danh ('present', 'late', 'absent')")
-    lecturer_id: str = Field(min_length=1, description="Mã hoặc tên giảng viên thực hiện")
-    reason: str = Field(min_length=3, description="Lý do điều chỉnh hoặc điểm danh thay thế")
+    status: Literal["present", "late", "absent"] = Field(
+        description="Trạng thái điểm danh ('present', 'late', 'absent')"
+    )
+    lecturer_id: str = Field(max_length=120, description="Mã hoặc tên giảng viên thực hiện")
+    reason: str = Field(max_length=500, description="Lý do điều chỉnh hoặc điểm danh thay thế")
 
 
 def xac_thuc_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -184,30 +172,6 @@ def bao_cao_buoi_hoc(session_id: int) -> list[dict[str, object]]:
     return report.astype(object).where(report.notna(), None).to_dict(orient="records")
 
 
-@app.post("/attendance", summary="Ghi nhận kết quả điểm danh cho sinh viên (Legacy compatibility)")
-def attendance(
-    request: YeuCauDiemDanh,
-    _: None = Depends(xac_thuc_api_key),
-) -> dict[str, Any]:
-    """Thực hiện transaction ghi nhận điểm danh trả về định dạng chuẩn hóa."""
-    try:
-        res = process_attendance_record(
-            session_id=request.session_id,
-            student_id=request.student_id,
-            distance=request.recognition_distance,
-            tolerance=FACE_TOLERANCE,
-        )
-        return res.to_dict()
-    except DuplicateAttendanceError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except SessionClosedError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except StudentNotInRosterError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
-    except AttendanceError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-
 @app.post(
     "/attendance/biometric",
     summary="Ghi nhận điểm danh sinh trắc học có kèm bằng chứng quyết định (Recognition Decision)",
@@ -215,6 +179,16 @@ def attendance(
 )
 def attendance_biometric(request: YeuCauDiemDanhBiometric) -> dict[str, Any]:
     """Nhận RecognitionDecision đầy đủ từ vision pipeline và thực hiện ghi nhận."""
+    if request.second_distance < request.distance or not math.isclose(
+        request.margin,
+        request.second_distance - request.distance,
+        rel_tol=0.0,
+        abs_tol=1e-6,
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Evidence không nhất quán: margin phải bằng Top-2 trừ Top-1.",
+        )
     policy_matches = RECOGNITION_POLICY.matches_evidence(
         policy_version=request.policy_version,
         distance_threshold=request.distance_threshold,
@@ -222,6 +196,7 @@ def attendance_biometric(request: YeuCauDiemDanhBiometric) -> dict[str, Any]:
         aggregation_strategy=request.aggregation_strategy,
         embedding_model=request.embedding_model,
         embedding_model_version=request.embedding_model_version,
+        confirmation_frames=request.confirmation_frames,
         stable_duration_ms=request.stable_duration_ms,
         liveness_policy=request.liveness_policy,
         recognition_policy_hash=request.recognition_policy_hash,
@@ -284,7 +259,8 @@ def attendance_manual(request: YeuCauDiemDanhManual) -> dict[str, Any]:
         return res.to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    except Exception as exc:
+    except Exception:
+        LOGGER.exception("Lỗi khi điều chỉnh điểm danh thủ công")
         raise HTTPException(
-            status_code=500, detail=f"Lỗi khi điều chỉnh điểm danh: {exc}"
+            status_code=500, detail="Không thể điều chỉnh điểm danh do lỗi hệ thống."
         ) from None

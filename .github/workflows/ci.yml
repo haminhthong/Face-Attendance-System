@@ -4,15 +4,30 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libopenblas-dev libgl1 libglib2.0-0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[dev]"
       - run: python -m compileall -q app.py src tests
-      - run: pytest -q
+      - run: ruff check app.py src tools tests
+      - run: ruff format --check app.py src tools tests
+      - run: pytest -q -p no:cacheprovider

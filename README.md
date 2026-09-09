@@ -1,227 +1,346 @@
-# 🎓 Hệ thống điểm danh bằng khuôn mặt
+# 🎓 Face Attendance System
 
-> Ứng dụng prototype dùng Streamlit/WebRTC để hỗ trợ điểm danh trong lớp học bằng embedding khuôn mặt, nhận diện open-set trong phạm vi roster, kiểm tra chớp mắt cơ bản và lưu quyết định bằng SQLite.
+[![CI](https://github.com/haminhthong/Face-Attendance-System/actions/workflows/ci.yml/badge.svg)](https://github.com/haminhthong/Face-Attendance-System/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.37%2B-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.10%2B-5C3EE8?logo=opencv&logoColor=white)](https://opencv.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![License](https://img.shields.io/badge/License-MIT-2ea44f)](LICENSE)
 
-Dự án ưu tiên tính đúng của luồng nghiệp vụ, khả năng truy vết và bảo vệ dữ liệu sinh trắc học. Đây chưa phải hệ thống chống giả mạo chuyên dụng hoặc một báo cáo độ chính xác biometric production.
+Hệ thống điểm danh sinh viên bằng khuôn mặt, gồm giao diện Streamlit/WebRTC, REST API FastAPI và cơ sở dữ liệu SQLite. Mã nguồn được tổ chức quanh một pipeline duy nhất: từ consent và quality gate, tạo embedding, open-set matching trong roster, liveness, temporal confirmation, kiểm tra policy ở application service, đến transaction điểm danh và báo cáo audit.
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python)
-![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-FF4B4B?logo=streamlit)
-![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi)
-![SQLite](https://img.shields.io/badge/Database-SQLite-003B57?logo=sqlite)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
+Đây là prototype kỹ thuật có kiểm soát, không phải hệ thống PAD chống deepfake/replay và chưa đưa ra claim accuracy biometric production. Embedding vẫn là dữ liệu sinh trắc học nhạy cảm dù ảnh gốc không được lưu.
 
----
+## 1. Bài toán và phạm vi ứng dụng
 
-## 1. Luồng xử lý hiện tại
+### Bài toán
 
-### Đăng ký sinh viên
+Trong một buổi học, hệ thống cần xác định người đang đứng trước camera có thuộc danh sách sinh viên của buổi đó hay không, chỉ ghi nhận một lần, phân biệt có mặt/đi trễ theo thời gian buổi học và bảo đảm quyết định có thể truy vết. Khi nhận diện không đủ bằng chứng, hệ thống phải từ chối thay vì cố đoán.
 
-1. Tầng ứng dụng yêu cầu consent rõ ràng trước khi giải mã ảnh.
-2. Luồng giao diện yêu cầu tối thiểu 5 ảnh của cùng một người.
-3. Quality gate kiểm tra kích thước, độ mờ, ánh sáng, đúng một khuôn mặt và ảnh gần trùng bằng pHash.
-4. Hệ thống tạo embedding 128 chiều, kiểm tra tính nhất quán giữa các ảnh và kiểm tra với profile hiện có.
-5. Chỉ embedding kèm metadata model/version/policy được lưu vào SQLite; ảnh gốc không được lưu.
+### Phạm vi hiện tại
 
-### Điểm danh realtime
+- Quản trị sinh viên, môn học, roster môn học và snapshot roster theo từng buổi học.
+- Đăng ký tối thiểu 5 ảnh hợp lệ sau khi có consent rõ ràng.
+- Kiểm tra đúng một khuôn mặt, kích thước, độ mờ, độ sáng, hash byte và pHash gần trùng.
+- Lưu embedding 128 chiều cùng metadata model/version, chất lượng và hash ảnh; không lưu ảnh gốc.
+- Điểm danh realtime qua WebRTC với open-set matching, Top-2 Mean, distance threshold, identity margin, liveness chớp mắt và temporal confirmation.
+- Điểm danh/sửa thủ công có giảng viên, lý do và audit trail; không giả mạo liveness AI.
+- Báo cáo theo snapshot roster, trong đó sinh viên chưa có bản ghi được hiển thị là vắng.
+- API có API key, policy metadata, báo cáo và hai luồng ghi nhận biometric/manual.
 
-~~~text
-WebRTC frame
-  -> lấy mẫu frame và chuẩn hóa ảnh
-  -> phát hiện khuôn mặt, bắt buộc đúng 1 mặt
-  -> tạo embedding
-  -> chỉ so khớp template của roster trong session
-  -> Top-2 Mean + distance threshold + identity margin
-  -> kiểm tra chớp mắt EAR
-  -> cùng identity đủ số quan sát và thời gian ổn định
-  -> RecognitionDecision chứa đầy đủ policy evidence
-  -> AttendanceService kiểm tra nghiệp vụ
-  -> SQLite transaction ghi attendance/audit/telemetry
-~~~
+### Ngoài phạm vi
 
-Các điều kiện từ chối được giữ riêng: không có mặt, nhiều mặt, ảnh kém chất lượng, unknown, ambiguous, liveness không đạt, session đóng, ngoài roster hoặc đã điểm danh. Human oversight là bước xử lý ngoại lệ/sửa có lý do; không phải yêu cầu giáo viên duyệt thủ công mọi lượt nhận diện.
+- Không tự động hiệu chuẩn threshold từ dữ liệu synthetic.
+- Không tuyên bố FAR/FRR/TAR hoặc khả năng chống giả mạo khi chưa có private validation/test set hợp lệ.
+- Liveness EAR blink chỉ là heuristic người thật cơ bản, không thay thế PAD chuyên dụng.
+- API key là cơ chế xác thực tích hợp nội bộ; chưa có OAuth/RBAC/attestation cho client camera.
 
-## 2. Recognition policy
+## 2. Luồng logic và data flow duy nhất
 
-Policy dùng chung nằm ở `src/face_attendance/policy.py`. Cấu hình mẫu ở `configs/recognition_policy.example.json`.
+RecognitionPolicy trong src/face_attendance/policy.py là nguồn sự thật cho model, dimension, metric, Top-2 Mean, threshold, margin, temporal và liveness. AttendanceService không tin threshold tùy ý từ client; nó kiểm tra policy evidence trước khi gọi transaction database. Consent policy version là metadata pháp lý riêng, không được so sánh với recognition policy version.
 
-Mặc định hiện tại:
+```mermaid
+flowchart TD
+    A[Admin mở ứng dụng] --> B[Thiết lập PIN quản trị]
+    B --> C[Nhập sinh viên + xác nhận consent]
+    C --> D{Có consent rõ ràng?}
+    D -- Không --> D1[Từ chối trước khi giải mã ảnh]
+    D -- Có --> E[Nhận tối thiểu 5 ảnh]
+    E --> F[Quality gate: file, OpenCV, đúng 1 mặt, kích thước, blur, brightness]
+    F --> G[SHA-256 + pHash near-duplicate]
+    G --> H{Còn ít nhất 5 ảnh duy nhất?}
+    H -- Không --> H1[Yêu cầu bổ sung ảnh]
+    H -- Có --> I[Face encoding 128D]
+    I --> J[Identity consistency trong batch và với profile cũ]
+    J --> K[SQLite: students + biometric_consents + face_embeddings]
+    K --> L[Tạo môn học và course roster]
+    L --> M[Tạo buổi học]
+    M --> N[Snapshot course roster vào session_enrollments]
 
-| Thuộc tính | Giá trị |
+    N --> O[WebRTC frame]
+    O --> P[Skip frame + resize 0.25x + HOG face detection]
+    P --> Q{Đúng 1 khuôn mặt?}
+    Q -- 0 --> Q0[Chờ frame tiếp theo]
+    Q -- >1 --> Q1[Single-Face Gate: từ chối frame]
+    Q -- 1 --> R[Encoding + landmarks EAR]
+    R --> S[Nạp template active, granted, còn hiệu lực, đúng model/version, thuộc session]
+    S --> T[Matcher theo student: Top-2 Mean]
+    T --> U{Distance <= threshold và margin >= threshold?}
+    U -- Không --> U1[Unknown hoặc ambiguous; không tạo attendance]
+    U -- Có --> V[Liveness ear_blink_v1 bắt buộc]
+    V --> W{Đủ blink + >= 3 quan sát + >= 500ms?}
+    W -- Không --> W1[Không cộng temporal evidence]
+    W -- Có --> X[Tạo RecognitionDecision đầy đủ evidence]
+    X --> Y[AttendanceService kiểm tra policy hash/version/model/temporal]
+    Y --> Z[Kiểm tra consent hiện tại]
+    Z -- Không --> Z1[Rejected: no_consent + recognition_attempt]
+    Z -- Có --> AA[BEGIN IMMEDIATE transaction]
+    AA --> AB[Kiểm tra session open, time window, roster snapshot, duplicate]
+    AB -- Không --> AB1[Rejected/closed/outside/already + audit]
+    AB -- Có --> AC[Ghi attendance present/late + evidence]
+    AC --> AD[Ghi audit_logs + recognition_attempts]
+    AD --> AE[Báo cáo SQLite/Pandas]
+
+    N --> AF[Giảng viên mở manual correction]
+    AF --> AG[Kiểm tra student thuộc session snapshot]
+    AG --> AH[Ghi/sửa status + lecturer + reason + audit]
+    AH --> AE
+
+    AI[API client] --> AJ[X-API-Key]
+    AJ --> AK[/policy, /sessions, /attendance/biometric, /attendance/manual]
+    AK --> Y
+```
+
+### Các điểm chặn chính
+
+1. Consent được kiểm tra trước khi giải mã hoặc xử lý ảnh.
+2. Enrollment chỉ tạo/cập nhật profile sau khi batch ảnh vượt quality gate và consistency gate.
+3. Runtime chỉ nạp template có active = 1, consent_status = granted, embedding chưa bị revoke, đúng dimension/model/version và thuộc session_enrollments.
+4. Single-Face Gate dừng frame có 0 hoặc nhiều hơn 1 khuôn mặt.
+5. Open-set matcher từ chối unknown và match mơ hồ; Top-2 Mean là chiến lược runtime duy nhất.
+6. Blink, số quan sát liên tiếp và thời gian ổn định là ba điều kiện evidence của realtime pipeline.
+7. Application service kiểm tra policy evidence và consent trước database transaction.
+8. Database kiểm tra buổi học, thời gian, roster snapshot và unique attendance trong BEGIN IMMEDIATE.
+9. Báo cáo lấy snapshot roster làm mẫu số nên sinh viên không có attendance row vẫn xuất hiện là Vắng.
+
+## 3. Recognition policy đang dùng
+
+Policy mặc định nằm trong DEFAULT_RECOGNITION_POLICY; có thể nạp file JSON qua RECOGNITION_POLICY_PATH. Artifact mẫu: configs/recognition_policy.example.json.
+
+| Thuộc tính | Giá trị mặc định |
 |---|---|
-| Model | `dlib_face_recognition_resnet_v1`, version `1` |
-| Kích thước embedding | `128` |
-| Metric | `euclidean_l2` |
-| Runtime aggregation | `top_k_mean`, `top_k = 2` |
-| Distance threshold | `0.50` |
-| Identity margin | `0.05` |
-| Temporal confirmation | ít nhất `3` quan sát và ổn định `500 ms` |
-| Liveness | `ear_blink_v1`, TTL `10` giây |
-| Calibrated | `false` trong policy mẫu |
+| Embedding model | dlib_face_recognition_resnet_v1 version 1 |
+| Dimension/metric | 128 / euclidean_l2 |
+| Aggregation | top_k_mean, top_k = 2 |
+| Distance threshold | 0.50 |
+| Identity margin | 0.05 |
+| Temporal | tối thiểu 3 quan sát và 500 ms |
+| Liveness | ear_blink_v1, TTL 10 giây |
+| Policy hash | SHA-256 trên JSON policy chuẩn hóa |
+| Calibrated | false ở policy mẫu/mặc định |
 
-`RECOGNITION_POLICY_PATH` cho phép nạp một policy JSON khác. Tất cả client biometric phải gửi policy evidence khớp policy server; API trả lỗi `409` nếu khác version, hash, threshold, model hoặc chiến lược.
+stable_duration_ms trong evidence là giá trị quan sát được và phải lớn hơn hoặc bằng mức policy yêu cầu; không so bằng tuyệt đối. Client biometric phải gửi đủ evidence. Server trả 409 nếu version, hash, threshold, model, aggregation, liveness hoặc temporal policy không khớp.
 
-Môi trường production bị từ chối khởi động khi policy chưa được hiệu chuẩn trên dữ liệu private phù hợp. Không cấu hình threshold rời rạc qua nhiều biến môi trường.
+Nếu một session chỉ có một identity, matcher không có ứng viên Top-2 thật; nó dùng sentinel hữu hạn đúng bằng margin policy để evidence vẫn serialize được và không coi đó là một khoảng cách đo được.
 
-## 3. Dữ liệu và quyền riêng tư
+Production chỉ khởi động khi APP_ENV=production, API key không phải giá trị mặc định và policy được đánh dấu calibrated=true. Giá trị calibrated phải là JSON boolean thật, không phải chuỗi "false".
 
-- Không commit ảnh khuôn mặt, embedding thật, database hoặc secret vào Git.
-- Consent được lưu theo phiên bản; thu hồi consent sẽ vô hiệu hóa và xóa embedding nhưng giữ lịch sử attendance/audit cần thiết.
-- Embedding vẫn là dữ liệu sinh trắc học nhạy cảm, dù ảnh gốc không được lưu.
-- `BIOMETRIC_RETENTION_DAYS` được dùng để dọn template quá hạn khi API khởi động.
-- Bộ dữ liệu đánh giá private phải có sự đồng ý hợp lệ và được bảo vệ ngoài repository.
-- `data/manifest.example.json` chỉ là ví dụ schema, không chứa ảnh thật.
+## 4. Dữ liệu, consent và retention
 
-Manifest private có dạng:
+SQLite tạo các nhóm bảng:
 
-~~~text
+- students: hồ sơ học vụ, active và trạng thái consent. active là trạng thái học vụ, không phải consent.
+- biometric_consents: lịch sử grant/revoke theo phiên bản văn bản consent.
+- face_embeddings: vector và metadata chất lượng/model/hash ảnh, không có raw image.
+- courses, course_enrollments, attendance_sessions, session_enrollments: môn học, roster và snapshot buổi học.
+- attendance: trạng thái cuối, bằng chứng nhận diện hoặc marker manual.
+- recognition_attempts: telemetry metadata của quyết định, không lưu raw image/unknown embedding.
+- audit_logs, app_settings: audit nghiệp vụ và cấu hình PIN/setting.
+
+Khi thu hồi consent, hệ thống xóa toàn bộ embedding, revoke consent và giữ hồ sơ học vụ, roster snapshot, báo cáo và lịch sử điểm danh. Khi retention job xóa embedding quá hạn, sinh viên chuyển về consent_status='pending' để đăng ký lại; active vẫn giữ nguyên. API chạy purge_expired_biometrics() lúc startup.
+
+Dữ liệu thật phải nằm ngoài Git:
+
+```text
 data/private/manifest.json
 data/private/enrollment/...
 data/private/validation/known/...
 data/private/validation/unknown/...
 data/private/test/known/...
 data/private/test/unknown/...
-~~~
+```
 
-Mỗi capture cần `identity_id`, `role`, `path`, `split` và `capture_session`. Tool kiểm tra hash SHA-256, split hợp lệ và không dùng chung capture session giữa enrollment với validation/test của cùng identity.
+Manifest mẫu data/manifest.example.json chỉ mô tả schema. Data card và quy ước lưu trữ nằm ở data/README.md.
 
-## 4. Đánh giá và hiệu chuẩn
+## 5. Cấu trúc thư mục
 
-Hai loại kiểm tra được tách biệt:
-
-### Synthetic matcher sanity
-
-~~~powershell
-python tools/prepare_dataset.py
-python tools/matcher_sanity_check.py
-~~~
-
-`matcher_sanity_check.py` và `evaluate_matching.py` chỉ dùng vector mô phỏng để kiểm tra toán matcher, Top-K/centroid/min-distance, margin, reject logic và latency. Kết quả luôn có `deployable: false`; không được dùng để chọn policy production.
-
-Min Distance và Centroid chỉ là chiến lược benchmark. Runtime attendance dùng Top-2 Mean.
-
-### Private manifest gate
-
-~~~powershell
-python tools/evaluate_biometrics.py --manifest data/private/manifest.json
-~~~
-
-Tool này không có fallback synthetic. Nó hiện kiểm tra tính hợp lệ của manifest và chống leakage; chưa tự tạo metric biometric hay tự freeze policy. Vì vậy kết quả gate không phải bằng chứng accuracy và không được gọi là production calibration.
-
-Ngưỡng chỉ được chọn trên validation. Test phải được giữ riêng, chạy sau khi policy đã khóa, và báo cáo tối thiểu FAR, FRR/TAR, wrong-ID, ambiguous rate và latency nếu đã triển khai đầy đủ phép đo.
-
-## 5. Cấu trúc dự án
-
-~~~text
+```text
 face-attendance-system/
-├── app.py                              # Điểm chạy Streamlit
+├── app.py                              # Entry point Streamlit
 ├── src/face_attendance/
-│   ├── domain/                         # Entity, enum và exception nghiệp vụ
+│   ├── domain/                         # Entity, enum, exception nghiệp vụ
 │   ├── application/
-│   │   ├── attendance_service.py       # Biometric/manual attendance
-│   │   └── enrollment_service.py       # Luồng đăng ký có consent
-│   ├── api.py                          # FastAPI endpoints
-│   ├── config.py                       # Environment và policy runtime
-│   ├── database.py                     # SQLite schema, migration, transaction, audit
+│   │   ├── attendance_service.py       # Biometric/manual application flow
+│   │   └── enrollment_service.py       # Consent gate cho enrollment
+│   ├── api.py                          # FastAPI health, policy, session, attendance
+│   ├── config.py                       # .env, path, giới hạn và policy runtime
+│   ├── database.py                     # Schema, migration, transaction, report, audit
 │   ├── liveness.py                     # EAR blink state machine
-│   ├── matcher.py                      # Open-set matching và aggregation
-│   ├── policy.py                       # Schema/hash/default recognition policy
-│   ├── recognition.py                  # Quality gate và realtime engine
-│   ├── ui.py                           # Streamlit dashboard
-│   └── utils.py                        # Tiện ích thời gian, chuỗi và bảo mật
+│   ├── matcher.py                      # Open-set matcher và Top-2 Mean
+│   ├── policy.py                       # Schema, hash và validation policy
+│   ├── recognition.py                  # Quality gate, enrollment, WebRTC engine
+│   ├── ui.py                           # Dashboard Streamlit/admin
+│   └── utils.py                        # Chuẩn hóa dữ liệu, UTC, PIN
 ├── configs/
-│   └── recognition_policy.example.json # Policy mẫu, chưa calibrated
+│   └── recognition_policy.example.json # Policy chưa calibrated
 ├── data/
-│   ├── manifest.example.json            # Manifest minh họa
-│   ├── private/                         # Dữ liệu thật, bị gitignore
-│   └── results/                         # Kết quả chạy cục bộ, bị gitignore
+│   ├── README.md                       # Data card và quy ước dữ liệu
+│   ├── manifest.example.json           # Manifest private minh họa
+│   ├── private/                        # Dữ liệu thật, tool tạo khi cần và bị ignore
+│   └── results/                        # Kết quả cục bộ, tool tạo khi chạy evaluation
 ├── tools/
-│   ├── evaluate_biometrics.py           # Private manifest gate
-│   ├── evaluate_matching.py             # Tên tương thích cho sanity check
-│   ├── matcher_sanity_check.py          # Entry point sanity check
-│   └── prepare_dataset.py               # Tạo thư mục và kiểm tra leakage
+│   ├── evaluate_biometrics.py          # Private manifest/leakage gate
+│   ├── evaluate_matching.py            # Matcher sanity/evaluation entry point
+│   ├── matcher_sanity_check.py         # Synthetic matcher sanity check
+│   └── prepare_dataset.py              # Chuẩn bị và kiểm tra dataset
 ├── tests/                               # Unit/integration tests
-├── .env.example                         # Cấu hình mẫu
+├── .env.example                         # Cấu hình môi trường mẫu
+├── .github/workflows/ci.yml             # CI lint, format, compile, test
 ├── Dockerfile
-└── pyproject.toml
-~~~
+├── LICENSE
+└── pyproject.toml                       # Dependency và tool configuration
+```
 
-Các thư mục `__pycache__`, `.pytest_cache`, `scratch` và dữ liệu runtime không thuộc source deliverable; chúng đã được ignore khỏi Git.
+Dependency duy nhất được quản lý trong pyproject.toml; requirements.txt dư thừa đã được loại bỏ để tránh hai nguồn version khác nhau. Cache Python, test, IDE, runtime DB và dữ liệu private bị ignore.
 
 ## 6. API
 
-Các endpoint cần `X-API-Key` trừ `/health`:
+Tất cả endpoint trừ /health cần header X-API-Key. API key được so sánh bằng secrets.compare_digest.
 
-- `GET /health`: kiểm tra service.
-- `GET /policy`: metadata policy đang chạy.
-- `GET /sessions`: danh sách buổi học.
-- `GET /sessions/{session_id}/attendance`: báo cáo điểm danh.
-- `POST /attendance`: endpoint tương thích legacy.
-- `POST /attendance/biometric`: nhận `RecognitionDecision` đầy đủ và ghi attendance.
-- `POST /attendance/manual`: giảng viên điều chỉnh hoặc ghi nhận thủ công, bắt buộc lý do.
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | /health | Health check công khai |
+| GET | /policy | Metadata policy đang chạy |
+| GET | /sessions | Danh sách buổi học |
+| GET | /sessions/{session_id}/attendance | Báo cáo attendance theo snapshot |
+| POST | /attendance/biometric | Nhận RecognitionDecision đầy đủ evidence |
+| POST | /attendance/manual | Giảng viên ghi/sửa status, bắt buộc reason |
 
-API biometric kiểm tra policy evidence ở server trước khi gọi application service. API không nhận threshold tùy ý để thay đổi quyết định runtime.
+Route /attendance legacy đã được loại bỏ để không tạo đường tắt bỏ qua liveness, temporal evidence và policy gate. Biometric chỉ đi qua /attendance/biometric; manual là luồng human oversight riêng.
+
+Ví dụ payload biometric phải lấy metadata từ GET /policy và gửi đầy đủ:
+
+```json
+{
+  "session_id": 12,
+  "student_id": 34,
+  "student_code": "SV001",
+  "full_name": "Nguyen Van A",
+  "distance": 0.32,
+  "second_distance": 0.55,
+  "margin": 0.23,
+  "liveness_passed": true,
+  "confirmation_frames": 3,
+  "policy_version": "face-policy-v1",
+  "distance_threshold": 0.5,
+  "margin_threshold": 0.05,
+  "aggregation_strategy": "top_k_mean",
+  "embedding_model": "dlib_face_recognition_resnet_v1",
+  "embedding_model_version": "1",
+  "stable_duration_ms": 500,
+  "liveness_policy": "ear_blink_v1",
+  "recognition_policy_hash": "<sha256-64-characters>"
+}
+```
+
+Manual request gồm session_id, student_id, status (present|late|absent), lecturer_id và reason. Database kiểm tra sinh viên thuộc snapshot của session trước khi ghi.
 
 ## 7. Cài đặt và chạy
 
-### Tạo môi trường
+### Windows PowerShell
 
-~~~powershell
-git clone <repository-url>
-cd face-attendance-system
+```powershell
+git clone https://github.com/haminhthong/Face-Attendance-System.git
+cd Face-Attendance-System
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -e ".[dev]"
-~~~
+Copy-Item .env.example .env
+```
 
-### Kiểm tra code
+Nếu PowerShell chặn script activate, có thể chạy trực tiếp .\.venv\Scripts\python.exe -m pip install -e ".[dev]".
 
-~~~powershell
-python -m ruff check src tools
-python -m pytest -q -p no:cacheprovider
-~~~
+### Linux/CI
 
-Nếu môi trường thiếu OpenCV hoặc dependency native, hãy cài đầy đủ nhóm dependency trong `pyproject.toml` trước khi chạy test liên quan ảnh/WebRTC.
+```bash
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+```
 
-### Chạy dashboard
+face-recognition/dlib và OpenCV cần native build/runtime. Linux CI cài build-essential, cmake, libopenblas-dev, libgl1, libglib2.0-0; Dockerfile cài cùng nhóm package.
 
-~~~powershell
-streamlit run app.py
-~~~
+### Cấu hình .env
 
-Mở `http://localhost:8501`.
+File .env được nạp tự động nếu python-dotenv có trong môi trường. Tối thiểu khi chạy local:
 
-### Chạy API
-
-~~~powershell
-uvicorn face_attendance.api:app --reload --port 8000
-~~~
-
-Swagger UI: `http://127.0.0.1:8000/docs`.
-
-### Cấu hình
-
-Copy `.env.example` thành `.env` và thay tối thiểu:
-
-~~~text
+```dotenv
 APP_ENV=development
-FACE_ATTENDANCE_API_KEY=<secret>
+FACE_ATTENDANCE_API_KEY=local-dev-secret
 DATABASE_PATH=face_attendance_data/face_attendance.db
 RECOGNITION_POLICY_PATH=
-~~~
+BIOMETRIC_RETENTION_DAYS=365
+MAX_UPLOAD_SIZE_MB=8
+PROCESS_EVERY_N_FRAMES=3
+LOG_LEVEL=INFO
+```
 
-Không đưa `.env`, API key, database hoặc dữ liệu private vào Git.
+DATABASE_PATH được ưu tiên hơn FACE_ATTENDANCE_DATA_DIR. Không commit .env, API key, SQLite DB, ảnh, embedding thật hoặc manifest private.
 
-## 8. Kiểm tra logic và giới hạn đã biết
+### Chạy dashboard và API
 
-- Enrollment application flow chặn thiếu consent trước khi decode ảnh và yêu cầu đủ 5 ảnh hợp lệ.
-- Runtime chỉ nạp template đã consent, còn hiệu lực, đúng model/version/dimension và thuộc session roster.
-- Matcher dùng distance và margin; temporal confirmation không thay thế liveness.
-- Liveness hiện là blink heuristic, không phải hệ thống PAD chống replay/deepfake.
-- Attendance được ghi trong transaction, chống duplicate và lưu evidence của quyết định.
-- Telemetry chỉ lưu metadata attempt, không lưu embedding thô.
-- `database.upsert_student(..., consent_given=None)` còn được giữ cho seed/legacy compatibility. Luồng ứng dụng chính không dùng giá trị này; khi xây production nên loại bỏ compatibility path sau khi migrate dữ liệu cũ.
-- Private biometric evaluation chưa hoàn tất phần encoding/metric tự động; không có claim accuracy trong repository.
+```bash
+streamlit run app.py
+uvicorn face_attendance.api:app --reload --port 8000
+```
 
-## 9. License
+Dashboard ở http://localhost:8501; Swagger UI ở http://127.0.0.1:8000/docs. Lần chạy đầu tiên, khu vực quản trị yêu cầu tạo PIN 6–12 chữ số.
 
-Dự án được phân phối theo MIT License.
+### Chạy Docker
+
+```bash
+docker build -t face-attendance-system .
+docker run --rm -p 8501:8501 \
+  -e APP_ENV=development \
+  -e FACE_ATTENDANCE_API_KEY=local-dev-secret \
+  -v face_attendance_data:/app/face_attendance_data \
+  face-attendance-system
+```
+
+## 8. Kiểm thử, CI và đánh giá
+
+Các lệnh CI chính:
+
+```bash
+python -m compileall -q app.py src tests
+ruff check app.py src tools tests
+ruff format --check app.py src tools tests
+pytest -q -p no:cacheprovider
+```
+
+GitHub Actions dùng Python 3.11, cài native dependencies trước khi cài .[dev], đặt permissions: contents: read, timeout 20 phút và hủy run cũ cùng branch. Test ảnh/WebRTC được chạy trong CI đầy đủ dependency; local thiếu OpenCV sẽ không đại diện cho CI.
+
+Chạy local:
+
+```bash
+python -m ruff check app.py src tools tests
+python -m ruff format --check app.py src tools tests
+python -m pytest -q -p no:cacheprovider
+```
+
+Các tool evaluation tách khỏi claim production:
+
+```bash
+python tools/prepare_dataset.py
+python tools/matcher_sanity_check.py
+python tools/evaluate_matching.py
+python tools/evaluate_biometrics.py --manifest data/private/manifest.json
+```
+
+Matcher sanity dùng vector synthetic để kiểm tra toán Top-K/centroid/min-distance, margin, reject và latency; kết quả không deployable. evaluate_biometrics.py không fallback sang synthetic, chỉ gate manifest/split/leakage và không tự chọn threshold. Validation dùng để chọn policy; test chỉ chạy sau khi policy khóa.
+
+## 9. Repo cleanliness và giới hạn triển khai
+
+- Chỉ còn hai file Markdown có mục đích: README này và data/README.md.
+- Không chứa file hướng dẫn cũ, report build hoặc requirements trùng với pyproject.
+- data/private và data/results không chứa artifact runtime trong repo; tool tự tạo khi cần.
+- CI kiểm tra format để ngăn whitespace và import drift quay lại.
+- Audit log không thay thế phân quyền; cần đặt SQLite trên volume bền vững, giới hạn filesystem permission và backup có kiểm soát.
+- Cần private validation/test set, đánh giá theo identity/capture session và review pháp lý trước khi gọi là production.
+
+## 10. License
+
+MIT License. Xem LICENSE.

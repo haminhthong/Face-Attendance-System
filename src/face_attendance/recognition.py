@@ -31,6 +31,7 @@ except ImportError:
 
 from .config import (
     ATTEMPT_COOLDOWN_SECONDS,
+    BIOMETRIC_CONSENT_POLICY_VERSION,
     BLINK_EAR_CLOSED,
     BLINK_EAR_OPEN,
     BLINK_VERIFICATION_SECONDS,
@@ -214,12 +215,11 @@ def enroll_student_images(
     Returns:
         tuple[int, list[str]]: (Số ảnh đã lưu thành công, Danh sách cảnh báo/lỗi nếu có).
 
-    ``consent_given=None`` chỉ được giữ cho các tool seed/compatibility cũ.
-    Luồng người dùng và application service luôn truyền ``True`` hoặc ``False``;
-    không gọi trực tiếp hàm thấp hơn để bỏ qua consent.
+    Đây là cổng cuối cùng trước khi giải mã ảnh, vì vậy chỉ nhận
+    ``consent_given=True``; không có đường tắt qua giá trị mặc định.
     """
     selected_policy = policy or DEFAULT_RECOGNITION_POLICY
-    if consent_given is False:
+    if consent_given is not True:
         raise BiometricConsentMissingError(
             "Cần có consent rõ ràng trước khi giải mã hoặc xử lý ảnh khuôn mặt."
         )
@@ -338,7 +338,7 @@ def enroll_student_images(
         full_name,
         class_name,
         consent_given=consent_given,
-        consent_policy_version=consent_policy_version or selected_policy.policy_version,
+        consent_policy_version=consent_policy_version or BIOMETRIC_CONSENT_POLICY_VERSION,
     )
     saved = 0
     duplicates = 0
@@ -493,7 +493,9 @@ class RecognitionEngine:
             self.attendance_service = record_biometric_attendance
         else:
             self.attendance_service = attendance_service
-        self.require_blink = require_blink
+        # Liveness là bằng chứng bắt buộc của pipeline sinh trắc học; không cho
+        # giao diện tắt kiểm tra rồi vẫn tạo RecognitionDecision hợp lệ.
+        self.require_blink = True
         self.templates = load_templates(session_id, self.policy)
         self.frame_number = 0
         self.confirm_counts: dict[int, int] = {}
@@ -543,8 +545,6 @@ class RecognitionEngine:
 
     def update_blink(self, student_id: int, landmarks: dict[str, Any] | None) -> bool:
         """Cập nhật tỉ lệ mắt và máy trạng thái chớp mắt."""
-        if not self.require_blink:
-            return True
         if not landmarks:
             return False
         left = ti_le_mat(landmarks.get("left_eye", []))
@@ -625,11 +625,7 @@ class RecognitionEngine:
         # 3. Duy nhất 1 khuôn mặt hợp lệ: Tiếp tục pipeline
         location = locations[0]
         encodings = face_recognition.face_encodings(rgb_small, [location], model="small")
-        landmarks_list = (
-            face_recognition.face_landmarks(rgb_small, [location], model="small")
-            if self.require_blink
-            else [{}]
-        )
+        landmarks_list = face_recognition.face_landmarks(rgb_small, [location], model="small")
         if not encodings:
             self.set_event("warning", "Không thể trích xuất đặc trưng khuôn mặt.")
             return self.draw_annotations(image_bgr)
@@ -719,6 +715,7 @@ class RecognitionEngine:
                     self.blink_checker.dat_lai(template.student_id)
                     self.confirm_counts[template.student_id] = 0
                     self.tracking_started_at = None
+                    self.current_tracking_student_id = None
                     try:
                         res = self.attendance_service(self.session_id, decision)
                         status_label = "CÓ MẶT" if res.status == "present" else "ĐI TRỄ"
