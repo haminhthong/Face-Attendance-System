@@ -22,7 +22,7 @@ import json
 import logging
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -36,14 +36,14 @@ ENROLLMENT_DIR = PRIVATE_DIR / "enrollment"
 VALIDATION_DIR = PRIVATE_DIR / "validation"
 TEST_DIR = PRIVATE_DIR / "test"
 
-SUB_DIRS = [
+SUB_DIRS: tuple[Path, ...] = (
     ENROLLMENT_DIR,
     VALIDATION_DIR / "known",
     VALIDATION_DIR / "unknown",
     TEST_DIR / "known",
     TEST_DIR / "unknown",
     RESULTS_DIR,
-]
+)
 
 
 def calculate_file_hash(path: Path) -> str:
@@ -63,37 +63,33 @@ def init_evaluation_dataset_structure() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     for folder in SUB_DIRS:
         folder.mkdir(parents=True, exist_ok=True)
-        # Tạo file .gitkeep nếu thư mục rỗng
-        gitkeep = folder / ".gitkeep"
-        if not gitkeep.exists():
-            gitkeep.touch()
 
     readme_path = DATA_DIR / "README.md"
     if not readme_path.exists():
         readme_path.write_text(
-            "# Data Directory Structure for Face Recognition Evaluation\n\n"
-            "Chứa cấu trúc đánh giá AI độc lập:\n"
+            "# Data card\n\n"
+            "Chứa cấu trúc đánh giá nhận diện khuôn mặt độc lập:\n"
             "- `private/enrollment/`: Ảnh đăng ký của các sinh viên tham chiếu (tối thiểu 5 ảnh/người).\n"
             "- `private/validation/`: Tập kiểm định dùng để dò threshold (chọn ngưỡng).\n"
             "- `private/test/`: Tập kiểm thử độc lập chỉ chạy sau khi đã chốt threshold.\n"
-            "- `results/`: Kết quả chạy benchmark và biểu đồ.\n\n"
-            "> **Lưu ý bảo mật**: Tất cả ảnh thật nằm trong `data/private/` được loại trừ bởi `.gitignore`.\n",
+            "- `results/`: Kết quả benchmark cục bộ, không commit vào Git.\n\n"
+            "> **Lưu ý bảo mật**: Ảnh thật trong `data/private/` được loại trừ bởi `.gitignore`.\n",
             encoding="utf-8",
         )
     LOGGER.info("Đã tạo cấu trúc thư mục dữ liệu tại %s", DATA_DIR)
 
 
-def check_data_leakage() -> Dict[str, List[str]]:
+def check_data_leakage() -> dict[str, list[str]]:
     """Phát hiện ảnh trùng giữa các tập Enrollment, Validation, và Test bằng hash SHA-256.
 
     Returns:
-        Dict[str, List[str]]: Mapping từ SHA-256 hash đến danh sách đường dẫn file bị lặp.
+        dict[str, list[str]]: Mapping từ SHA-256 hash đến danh sách đường dẫn file bị lặp.
     """
     manifest_path = PRIVATE_DIR / "manifest.json"
     if manifest_path.exists():
         validate_capture_manifest(manifest_path)
 
-    hashes: Dict[str, List[Path]] = {}
+    hashes: dict[str, list[Path]] = {}
     valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
     for root_dir in [ENROLLMENT_DIR, VALIDATION_DIR, TEST_DIR]:
@@ -121,7 +117,7 @@ def check_data_leakage() -> Dict[str, List[str]]:
 
 
 def validate_capture_manifest(manifest_path: Path | None = None) -> None:
-    """É enforce capture-session split trong private manifest.
+    """Bắt buộc tách capture session trong manifest dữ liệu private.
 
     Image gần nhau giữa các split phải bị loại ở bước pHash bên dưới; còn
     manifest này chặn trước các lỗi cấu trúc như dùng chung session hoặc đưa
@@ -187,14 +183,14 @@ def validate_capture_manifest(manifest_path: Path | None = None) -> None:
             )
 
 
-def check_near_duplicates_phash(threshold: int = 3) -> Dict[str, List[str]]:
+def check_near_duplicates_phash(threshold: int = 3) -> dict[str, list[str]]:
     """Phát hiện ảnh gần trùng (near-duplicates) giữa các tập dữ liệu bằng Perceptual Hash (pHash).
 
     Args:
         threshold: Ngưỡng khoảng cách Hamming tối đa (mặc định <= 3 coi là gần trùng).
 
     Returns:
-        Dict[str, List[str]]: Danh sách các cặp ảnh bị nghi ngờ rò rỉ hoặc quá giống nhau.
+        dict[str, list[str]]: Danh sách các cặp ảnh bị nghi ngờ rò rỉ hoặc quá giống nhau.
     """
     try:
         import imagehash
@@ -215,10 +211,10 @@ def check_near_duplicates_phash(threshold: int = 3) -> Dict[str, List[str]]:
                     with Image.open(file_path) as img:
                         ph = imagehash.phash(img)
                         phashes.append((str(file_path.relative_to(DATA_DIR)), file_path, ph))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    LOGGER.warning("Bỏ qua ảnh không đọc được %s: %s", file_path, exc)
 
-    near_duplicates: Dict[str, List[str]] = {}
+    near_duplicates: dict[str, list[str]] = {}
     for i in range(len(phashes)):
         for j in range(i + 1, len(phashes)):
             rel_i, _, ph_i = phashes[i]

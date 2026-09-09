@@ -32,11 +32,7 @@ Thumbs.db
 *.db-shm
 *.db-wal
 face_attendance_data/
-scratch/
 
 # Dữ liệu sinh trắc học/private và kết quả cục bộ
 data/private/**
-!data/private/**/
-!data/private/**/.gitkeep
 data/results/**
-!data/results/.gitkeep

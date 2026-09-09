@@ -60,7 +60,7 @@ def test_matcher_empty_database() -> None:
 
 def test_matcher_boundary_thresholds() -> None:
     query = np.zeros(128)
-    # L2 distance between zeros(128) and vec is sqrt(128 * 0.001953125) = sqrt(0.25) = 0.50
+    # Khoảng cách L2 giữa zeros(128) và vec là sqrt(128 * 0.001953125) = sqrt(0.25) = 0.50
     val = np.sqrt(0.25 / 128)
     sample_exact = Mau(1, np.full(128, val))
 

@@ -57,7 +57,7 @@ def test_min_distance_aggregation() -> None:
 
 def test_centroid_aggregation() -> None:
     query = np.zeros(128)
-    query[0] = 1.0  # Unit vector on dim 0
+    query[0] = 1.0  # Vector đơn vị trên chiều 0
 
     # Student 1: hai vector
     v1 = np.zeros(128)
