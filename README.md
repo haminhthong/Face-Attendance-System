@@ -137,7 +137,6 @@ Kiến trúc được tổ chức gọn gàng, module hóa cao và không bị o
 face-attendance-system/
 ├── app.py                      # Điểm chạy chính Streamlit Dashboard
 ├── pyproject.toml              # Cấu hình dự án và dependencies
-├── Dockerfile                  # Container hóa triển khai Streamlit
 ├── src/
 │   └── face_attendance/
 │       ├── __init__.py         # Package entry & version
@@ -219,16 +218,6 @@ ruff format --check app.py src tests
 
 # Chạy toàn bộ test suite
 pytest -v -p no:cacheprovider
-```
-
-### 5.6. Chạy với Docker
-
-```bash
-# Build Docker image
-docker build -t face-attendance-system .
-
-# Khởi chạy container
-docker run -p 8501:8501 face-attendance-system
 ```
 
 ---

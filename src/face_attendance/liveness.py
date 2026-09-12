@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 import numpy as np
 
@@ -37,8 +38,13 @@ def eye_aspect_ratio(landmarks_points: list[tuple[int, int]]) -> float | None:
     return (vertical_1 + vertical_2) / (2.0 * horizontal)
 
 
-# Alias tiếng Việt
-ti_le_mat = eye_aspect_ratio
+class BlinkState(StrEnum):
+    """Trạng thái chu trình kiểm tra chớp mắt (FSM)."""
+
+    WAITING_OPEN = "waiting_open"
+    WAITING_CLOSED = "waiting_closed"
+    WAITING_REOPEN = "waiting_reopen"
+    VERIFIED = "verified"
 
 
 @dataclass
@@ -46,16 +52,16 @@ class BlinkDetector:
     """Máy trạng thái theo dõi và xác nhận chu trình chớp mắt của từng khuôn mặt.
 
     Trạng thái:
-    - `can_mo`: Chờ mắt mở (EAR >= eye_open) -> chuyển sang `can_nham`.
-    - `can_nham`: Chờ nhắm mắt (EAR <= eye_closed) -> chuyển sang `can_mo_lai`.
-    - `can_mo_lai`: Chờ mở mắt lại để hoàn tất 1 chu trình chớp.
-    - `da_xac_minh`: Đã xác minh thành công.
+    - `WAITING_OPEN`: Chờ mắt mở (EAR >= eye_open) -> chuyển sang `WAITING_CLOSED`.
+    - `WAITING_CLOSED`: Chờ nhắm mắt (EAR <= eye_closed) -> chuyển sang `WAITING_REOPEN`.
+    - `WAITING_REOPEN`: Chờ mở mắt lại để hoàn tất 1 chu trình chớp.
+    - `VERIFIED`: Đã xác minh thành công trong thời hạn ttl_seconds.
     """
 
     eye_closed_threshold: float = 0.19
     eye_open_threshold: float = 0.23
     ttl_seconds: float = 10.0
-    states: dict[int, str] = field(default_factory=dict)
+    states: dict[int, BlinkState] = field(default_factory=dict)
     verified_at: dict[int, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -70,50 +76,27 @@ class BlinkDetector:
             return False
 
         now = time.monotonic()
-        state = self.states.get(student_id, "can_mo")
+        state = self.states.get(student_id, BlinkState.WAITING_OPEN)
 
         # Kiểm tra TTL xác minh
-        if state == "da_xac_minh":
+        if state == BlinkState.VERIFIED:
             if now - self.verified_at.get(student_id, 0) <= self.ttl_seconds:
                 return True
-            state = "can_mo"
+            state = BlinkState.WAITING_OPEN
 
         # Chuyển đổi trạng thái FSM
-        if state == "can_mo" and ear >= self.eye_open_threshold:
-            state = "can_nham"
-        elif state == "can_nham" and ear <= self.eye_closed_threshold:
-            state = "can_mo_lai"
-        elif state == "can_mo_lai" and ear >= self.eye_open_threshold:
-            state = "da_xac_minh"
+        if state == BlinkState.WAITING_OPEN and ear >= self.eye_open_threshold:
+            state = BlinkState.WAITING_CLOSED
+        elif state == BlinkState.WAITING_CLOSED and ear <= self.eye_closed_threshold:
+            state = BlinkState.WAITING_REOPEN
+        elif state == BlinkState.WAITING_REOPEN and ear >= self.eye_open_threshold:
+            state = BlinkState.VERIFIED
             self.verified_at[student_id] = now
 
         self.states[student_id] = state
-        return state == "da_xac_minh"
+        return state == BlinkState.VERIFIED
 
     def reset(self, student_id: int) -> None:
         """Xóa trạng thái theo dõi khi khuôn mặt rời khỏi khung hình hoặc đổi người."""
         self.states.pop(student_id, None)
         self.verified_at.pop(student_id, None)
-
-
-# Alias tương thích
-class BoKiemTraChopMat:
-    """Wrapper tương thích mã cũ."""
-
-    def __init__(
-        self,
-        nguong_nham: float = 0.19,
-        nguong_mo: float = 0.23,
-        thoi_han_giay: float = 10.0,
-    ) -> None:
-        self._detector = BlinkDetector(
-            eye_closed_threshold=nguong_nham,
-            eye_open_threshold=nguong_mo,
-            ttl_seconds=thoi_han_giay,
-        )
-
-    def cap_nhat(self, student_id: int, ti_le: float | None) -> bool:
-        return self._detector.update(student_id, ti_le)
-
-    def dat_lai(self, student_id: int) -> None:
-        self._detector.reset(student_id)

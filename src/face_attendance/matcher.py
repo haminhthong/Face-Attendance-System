@@ -47,26 +47,6 @@ class MatchResult:
         """Kiểm tra khuôn mặt có được chấp nhận danh tính hay không."""
         return self.template is not None
 
-    @property
-    def mau(self) -> Any | None:
-        """Alias tương thích cho template."""
-        return self.template
-
-    @property
-    def khoang_cach(self) -> float:
-        """Alias tương thích cho distance."""
-        return self.distance
-
-    @property
-    def do_phan_biet(self) -> float:
-        """Alias tương thích cho margin."""
-        return self.margin
-
-    @property
-    def khoang_cach_thu_hai(self) -> float:
-        """Alias tương thích cho second_distance."""
-        return self.second_distance
-
 
 def match_face(
     embedding: np.ndarray,
@@ -145,8 +125,3 @@ def match_face(
         best_student_id=best_id,
         second_student_id=second_id,
     )
-
-
-# Alias hỗ trợ mã cũ/tiếng Việt
-tim_danh_tinh_tot_nhat = match_face
-KetQuaSoKhop = MatchResult

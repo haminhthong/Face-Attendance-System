@@ -38,26 +38,11 @@ from .config import (
     RecognitionConfig,
 )
 from .database import get_connection
-
-# Re-export các hàm enrollment để giữ tính tiện dụng
-from .enrollment import (
-    EnrollmentSample as EnrollmentResult,  # noqa: F401
-)
-from .enrollment import (
-    decode_and_validate_face,  # noqa: F401
-    enroll_student,  # noqa: F401
-)
 from .liveness import BlinkDetector, eye_aspect_ratio
 from .matcher import MatchResult, match_face
 from .utils import utc_iso
 
 LOGGER = logging.getLogger(__name__)
-
-
-# Alias tương thích
-def enroll_student_images(*args: Any, **kwargs: Any):
-    """Hàm wrapper cho enroll_student."""
-    return enroll_student(*args, **kwargs)
 
 
 @dataclass(frozen=True)

@@ -217,7 +217,3 @@ def enroll_student(
         saved_count += 1
 
     return saved_count, warnings
-
-
-# Alias tương thích
-process_student_enrollment = enroll_student

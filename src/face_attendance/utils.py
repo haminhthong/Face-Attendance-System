@@ -15,8 +15,6 @@ import secrets
 from datetime import date, datetime, timezone
 from datetime import time as dt_time
 
-import numpy as np
-
 from .config import COURSE_CODE_PATTERN, PIN_ITERATIONS, STUDENT_CODE_PATTERN, VN_TZ
 
 
@@ -177,36 +175,3 @@ def verify_pin(pin: str, stored_value: str) -> bool:
         return hmac.compare_digest(actual, expected)
     except (ValueError, TypeError):
         return False
-
-
-def prepare_face_embedding(
-    image_rgb: np.ndarray,
-    detection_model: str = "hog",
-    num_jitters: int = 1,
-) -> np.ndarray | None:
-    """Pipeline chuẩn hóa trích xuất vector khuôn mặt 128D cho cả đăng ký, kiểm thử và realtime.
-
-    Args:
-        image_rgb (np.ndarray): Ảnh RGB numpy array.
-        detection_model (str): Mô hình phát hiện ('hog' hoặc 'cnn').
-        num_jitters (int): Số lần biến đổi jitter để tăng độ chính xác vector.
-
-    Returns:
-        np.ndarray | None: Vector 128D hoặc None nếu không phát hiện duy nhất 1 khuôn mặt.
-    """
-    import face_recognition
-
-    locations = face_recognition.face_locations(
-        image_rgb,
-        model=detection_model,
-    )
-
-    if len(locations) != 1:
-        return None
-
-    encodings = face_recognition.face_encodings(
-        image_rgb,
-        known_face_locations=locations,
-        num_jitters=num_jitters,
-    )
-    return np.asarray(encodings[0], dtype=np.float64) if encodings else None
