@@ -1,17 +1,19 @@
 """Unit tests cho module cấu hình hệ thống."""
 
-import pytest
-
-from face_attendance import config
+from face_attendance.config import DEFAULT_CONFIG, RecognitionConfig
 
 
-def test_production_mode_denies_default_api_key(monkeypatch) -> None:
-    monkeypatch.setattr(config, "APP_ENV", "production")
-    monkeypatch.setattr(config, "API_KEY", "change-me")
+def test_recognition_config_defaults() -> None:
+    cfg = RecognitionConfig()
+    assert cfg.distance_threshold == 0.50
+    assert cfg.identity_margin == 0.05
+    assert cfg.top_k == 2
+    assert cfg.min_confirmations == 3
+    assert cfg.stable_duration_ms == 500
+    assert cfg.eye_closed_threshold == 0.19
+    assert cfg.eye_open_threshold == 0.23
 
-    with pytest.raises(RuntimeError, match="Ứng dụng từ chối khởi chạy"):
-        # Giả lập lại logic khởi tạo cấu hình ở production
-        if config.APP_ENV == "production" and config.API_KEY in {"change-me", "default"}:
-            raise RuntimeError(
-                "Ứng dụng từ chối khởi chạy ở môi trường Production vì chưa cấu hình khóa FACE_ATTENDANCE_API_KEY bảo mật."
-            )
+
+def test_default_config_instance() -> None:
+    assert DEFAULT_CONFIG.distance_threshold == 0.50
+    assert DEFAULT_CONFIG.top_k == 2

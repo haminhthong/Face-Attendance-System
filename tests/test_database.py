@@ -3,7 +3,7 @@ from datetime import timedelta
 import numpy as np
 
 from face_attendance import config, database
-from face_attendance.utils import utc_iso, utc_now
+from face_attendance.utils import utc_now
 
 
 def tao_du_lieu_buoi_hoc(tmp_path, monkeypatch) -> tuple[int, int]:
@@ -53,7 +53,7 @@ def test_session_roster_is_a_snapshot(tmp_path, monkeypatch) -> None:
     assert report["Trạng thái"].tolist() == ["Vắng"]
 
 
-def test_expired_embedding_is_removed(tmp_path, monkeypatch) -> None:
+def test_remove_student_biometrics(tmp_path, monkeypatch) -> None:
     test_db = tmp_path / "test.db"
     monkeypatch.setattr(config, "DB_PATH", test_db)
     monkeypatch.setattr(database, "DB_PATH", test_db)
@@ -69,25 +69,15 @@ def test_expired_embedding_is_removed(tmp_path, monkeypatch) -> None:
         150,
         150,
     )
-    with database.get_connection() as connection:
-        connection.execute(
-            "UPDATE face_embeddings SET created_at_utc = ?",
-            (utc_iso(utc_now() - timedelta(days=10)),),
-        )
+    assert len(database.get_student_embeddings(student_id)) == 1
 
-    deleted = database.purge_expired_biometrics(retention_days=5)
-
+    deleted = database.remove_student_biometrics(student_id)
     assert deleted == 1
-    with database.get_connection() as connection:
-        row = connection.execute(
-            "SELECT active, consent_status FROM students WHERE id = ?", (student_id,)
-        ).fetchone()
-    assert row["active"] == 1
-    assert row["consent_status"] == "pending"
+    assert len(database.get_student_embeddings(student_id)) == 0
 
 
 def test_attendance_report_handles_absent_students(tmp_path, monkeypatch) -> None:
-    """Kiểm tra báo cáo điểm danh xử lý chính xác cả sinh viên có mặt lẫn sinh viên vắng mặt mà không gây lỗi kiểu dữ liệu."""
+    """Kiểm tra báo cáo điểm danh xử lý chính xác cả sinh viên có mặt lẫn sinh viên vắng mặt."""
     test_db = tmp_path / "test.db"
     monkeypatch.setattr(config, "DB_PATH", test_db)
     monkeypatch.setattr(database, "DB_PATH", test_db)

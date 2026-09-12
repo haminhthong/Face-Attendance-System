@@ -8,341 +8,233 @@
 [![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/License-MIT-2ea44f)](LICENSE)
 
-Hệ thống điểm danh sinh viên bằng khuôn mặt, gồm giao diện Streamlit/WebRTC, REST API FastAPI và cơ sở dữ liệu SQLite. Mã nguồn được tổ chức quanh một pipeline duy nhất: từ consent và quality gate, tạo embedding, open-set matching trong roster, liveness, temporal confirmation, kiểm tra policy ở application service, đến transaction điểm danh và báo cáo audit.
+Hệ thống điểm danh sinh viên bằng khuôn mặt (Face Attendance System) xây dựng trên nền tảng **Computer Vision & Biometrics Engineering**, tích hợp giao diện thời gian thực **Streamlit WebRTC**, dịch vụ phục vụ **FastAPI**, và cơ sở dữ liệu **SQLite**.
 
-Đây là prototype kỹ thuật có kiểm soát, không phải hệ thống PAD chống deepfake/replay và chưa đưa ra claim accuracy biometric production. Embedding vẫn là dữ liệu sinh trắc học nhạy cảm dù ảnh gốc không được lưu.
+Dự án tập trung giải quyết bài toán cốt lõi trong nhận diện khuôn mặt thực tế: **Open-Set Face Recognition** (từ chối người lạ, không ép nhận diện vào một sinh viên gần nhất), kết hợp kiểm tra tương tác chớp mắt (**Eye Aspect Ratio - EAR**) và xác thực ổn định đa khung hình (**Temporal Confirmation**).
 
-## 1. Bài toán và phạm vi ứng dụng
+---
 
-### Bài toán
+## 1. Kiến trúc luồng xử lý (8 Bước cốt lõi)
 
-Trong một buổi học, hệ thống cần xác định người đang đứng trước camera có thuộc danh sách sinh viên của buổi đó hay không, chỉ ghi nhận một lần, phân biệt có mặt/đi trễ theo thời gian buổi học và bảo đảm quyết định có thể truy vết. Khi nhận diện không đủ bằng chứng, hệ thống phải từ chối thay vì cố đoán.
-
-### Phạm vi hiện tại
-
-- Quản trị sinh viên, môn học, roster môn học và snapshot roster theo từng buổi học.
-- Đăng ký tối thiểu 5 ảnh hợp lệ sau khi có consent rõ ràng.
-- Kiểm tra đúng một khuôn mặt, kích thước, độ mờ, độ sáng, hash byte và pHash gần trùng.
-- Lưu embedding 128 chiều cùng metadata model/version, chất lượng và hash ảnh; không lưu ảnh gốc.
-- Điểm danh realtime qua WebRTC với open-set matching, Top-2 Mean, distance threshold, identity margin, liveness chớp mắt và temporal confirmation.
-- Điểm danh/sửa thủ công có giảng viên, lý do và audit trail; không giả mạo liveness AI.
-- Báo cáo theo snapshot roster, trong đó sinh viên chưa có bản ghi được hiển thị là vắng.
-- API có API key, policy metadata, báo cáo và hai luồng ghi nhận biometric/manual.
-
-### Ngoài phạm vi
-
-- Không tự động hiệu chuẩn threshold từ dữ liệu synthetic.
-- Không tuyên bố FAR/FRR/TAR hoặc khả năng chống giả mạo khi chưa có private validation/test set hợp lệ.
-- Liveness EAR blink chỉ là heuristic người thật cơ bản, không thay thế PAD chuyên dụng.
-- API key là cơ chế xác thực tích hợp nội bộ; chưa có OAuth/RBAC/attestation cho client camera.
-
-## 2. Luồng logic và data flow duy nhất
-
-RecognitionPolicy trong src/face_attendance/policy.py là nguồn sự thật cho model, dimension, metric, Top-2 Mean, threshold, margin, temporal và liveness. AttendanceService không tin threshold tùy ý từ client; nó kiểm tra policy evidence trước khi gọi transaction database. Consent policy version là metadata pháp lý riêng, không được so sánh với recognition policy version.
-
-```mermaid
-flowchart TD
-    A[Admin mở ứng dụng] --> B[Thiết lập PIN quản trị]
-    B --> C[Nhập sinh viên + xác nhận consent]
-    C --> D{Có consent rõ ràng?}
-    D -- Không --> D1[Từ chối trước khi giải mã ảnh]
-    D -- Có --> E[Nhận tối thiểu 5 ảnh]
-    E --> F[Quality gate: file, OpenCV, đúng 1 mặt, kích thước, blur, brightness]
-    F --> G[SHA-256 + pHash near-duplicate]
-    G --> H{Còn ít nhất 5 ảnh duy nhất?}
-    H -- Không --> H1[Yêu cầu bổ sung ảnh]
-    H -- Có --> I[Face encoding 128D]
-    I --> J[Identity consistency trong batch và với profile cũ]
-    J --> K[SQLite: students + biometric_consents + face_embeddings]
-    K --> L[Tạo môn học và course roster]
-    L --> M[Tạo buổi học]
-    M --> N[Snapshot course roster vào session_enrollments]
-
-    N --> O[WebRTC frame]
-    O --> P[Skip frame + resize 0.25x + HOG face detection]
-    P --> Q{Đúng 1 khuôn mặt?}
-    Q -- 0 --> Q0[Chờ frame tiếp theo]
-    Q -- >1 --> Q1[Single-Face Gate: từ chối frame]
-    Q -- 1 --> R[Encoding + landmarks EAR]
-    R --> S[Nạp template active, granted, còn hiệu lực, đúng model/version, thuộc session]
-    S --> T[Matcher theo student: Top-2 Mean]
-    T --> U{Distance <= threshold và margin >= threshold?}
-    U -- Không --> U1[Unknown hoặc ambiguous; không tạo attendance]
-    U -- Có --> V[Liveness ear_blink_v1 bắt buộc]
-    V --> W{Đủ blink + >= 3 quan sát + >= 500ms?}
-    W -- Không --> W1[Không cộng temporal evidence]
-    W -- Có --> X[Tạo RecognitionDecision đầy đủ evidence]
-    X --> Y[AttendanceService kiểm tra policy hash/version/model/temporal]
-    Y --> Z[Kiểm tra consent hiện tại]
-    Z -- Không --> Z1[Rejected: no_consent + recognition_attempt]
-    Z -- Có --> AA[BEGIN IMMEDIATE transaction]
-    AA --> AB[Kiểm tra session open, time window, roster snapshot, duplicate]
-    AB -- Không --> AB1[Rejected/closed/outside/already + audit]
-    AB -- Có --> AC[Ghi attendance present/late + evidence]
-    AC --> AD[Ghi audit_logs + recognition_attempts]
-    AD --> AE[Báo cáo SQLite/Pandas]
-
-    N --> AF[Giảng viên mở manual correction]
-    AF --> AG[Kiểm tra student thuộc session snapshot]
-    AG --> AH[Ghi/sửa status + lecturer + reason + audit]
-    AH --> AE
-
-    AI[API client] --> AJ[X-API-Key]
-    AJ --> AK[/policy, /sessions, /attendance/biometric, /attendance/manual]
-    AK --> Y
-```
-
-### Các điểm chặn chính
-
-1. Consent được kiểm tra trước khi giải mã hoặc xử lý ảnh.
-2. Enrollment chỉ tạo/cập nhật profile sau khi batch ảnh vượt quality gate và consistency gate.
-3. Runtime chỉ nạp template có active = 1, consent_status = granted, embedding chưa bị revoke, đúng dimension/model/version và thuộc session_enrollments.
-4. Single-Face Gate dừng frame có 0 hoặc nhiều hơn 1 khuôn mặt.
-5. Open-set matcher từ chối unknown và match mơ hồ; Top-2 Mean là chiến lược runtime duy nhất.
-6. Blink, số quan sát liên tiếp và thời gian ổn định là ba điều kiện evidence của realtime pipeline.
-7. Application service kiểm tra policy evidence và consent trước database transaction.
-8. Database kiểm tra buổi học, thời gian, roster snapshot và unique attendance trong BEGIN IMMEDIATE.
-9. Báo cáo lấy snapshot roster làm mẫu số nên sinh viên không có attendance row vẫn xuất hiện là Vắng.
-
-## 3. Recognition policy đang dùng
-
-Policy mặc định nằm trong DEFAULT_RECOGNITION_POLICY; có thể nạp file JSON qua RECOGNITION_POLICY_PATH. Artifact mẫu: configs/recognition_policy.example.json.
-
-| Thuộc tính | Giá trị mặc định |
-|---|---|
-| Embedding model | dlib_face_recognition_resnet_v1 version 1 |
-| Dimension/metric | 128 / euclidean_l2 |
-| Aggregation | top_k_mean, top_k = 2 |
-| Distance threshold | 0.50 |
-| Identity margin | 0.05 |
-| Temporal | tối thiểu 3 quan sát và 500 ms |
-| Liveness | ear_blink_v1, TTL 10 giây |
-| Policy hash | SHA-256 trên JSON policy chuẩn hóa |
-| Calibrated | false ở policy mẫu/mặc định |
-
-stable_duration_ms trong evidence là giá trị quan sát được và phải lớn hơn hoặc bằng mức policy yêu cầu; không so bằng tuyệt đối. Client biometric phải gửi đủ evidence. Server trả 409 nếu version, hash, threshold, model, aggregation, liveness hoặc temporal policy không khớp.
-
-Nếu một session chỉ có một identity, matcher không có ứng viên Top-2 thật; nó dùng sentinel hữu hạn đúng bằng margin policy để evidence vẫn serialize được và không coi đó là một khoảng cách đo được.
-
-Production chỉ khởi động khi APP_ENV=production, API key không phải giá trị mặc định và policy được đánh dấu calibrated=true. Giá trị calibrated phải là JSON boolean thật, không phải chuỗi "false".
-
-## 4. Dữ liệu, consent và retention
-
-SQLite tạo các nhóm bảng:
-
-- students: hồ sơ học vụ, active và trạng thái consent. active là trạng thái học vụ, không phải consent.
-- biometric_consents: lịch sử grant/revoke theo phiên bản văn bản consent.
-- face_embeddings: vector và metadata chất lượng/model/hash ảnh, không có raw image.
-- courses, course_enrollments, attendance_sessions, session_enrollments: môn học, roster và snapshot buổi học.
-- attendance: trạng thái cuối, bằng chứng nhận diện hoặc marker manual.
-- recognition_attempts: telemetry metadata của quyết định, không lưu raw image/unknown embedding.
-- audit_logs, app_settings: audit nghiệp vụ và cấu hình PIN/setting.
-
-Khi thu hồi consent, hệ thống xóa toàn bộ embedding, revoke consent và giữ hồ sơ học vụ, roster snapshot, báo cáo và lịch sử điểm danh. Khi retention job xóa embedding quá hạn, sinh viên chuyển về consent_status='pending' để đăng ký lại; active vẫn giữ nguyên. API chạy purge_expired_biometrics() lúc startup.
-
-Dữ liệu thật phải nằm ngoài Git:
+Toàn bộ quy trình từ đăng ký mẫu đến điểm danh tự động được thiết kế trực diện, minh bạch và giải thích được:
 
 ```text
-data/private/manifest.json
-data/private/enrollment/...
-data/private/validation/known/...
-data/private/validation/unknown/...
-data/private/test/known/...
-data/private/test/unknown/...
+       Enrollment images (5 ảnh)
+                  │
+                  ▼
+          Detect one face
+       (Blur, Brightness, Size)
+                  │
+                  ▼
+       Identity Consistency Check
+        (Pairwise distance <= 0.50)
+                  │
+                  ▼
+        Create 128D embeddings
+           (Store in SQLite)
+                  │
+                  ▼
+            Webcam frame
+         (Streamlit WebRTC)
+                  │
+                  ▼
+         Single-Face Gate
+       (Exactly 1 face in frame)
+                  │
+                  ▼
+        Open-Set Recognition
+      Euclidean L2 (Top-K Mean)
+     distance <= 0.50  &  margin >= 0.05
+                  │
+                  ▼
+       Blink Challenge (EAR FSM)
+       (eyes open -> closed -> open)
+                  │
+                  ▼
+         Temporal Confirmation
+      (>= 3 frames, >= 500 ms stable)
+                  │
+                  ▼
+         Mark attendance
+      (Present / Late in SQLite)
 ```
 
-Manifest mẫu data/manifest.example.json chỉ mô tả schema. Data card và quy ước lưu trữ nằm ở data/README.md.
+---
 
-## 5. Cấu trúc thư mục
+## 2. Kỹ thuật Computer Vision & Nhận diện sinh trắc học
+
+### 2.1. Open-Set Recognition vs Closed-Set Classification
+
+Trong môi trường thực tế, hệ thống không thể hoạt động như một bộ phân loại đóng (Closed-Set Classifier - luôn gán khuôn mặt vào 1 trong các sinh viên có sẵn). Dự án triển khai thuật toán **Open-Set Recognition** với cơ chế từ chối kép:
+
+1. **Khoảng cách tối đa (Distance Threshold $\le 0.50$):**
+   - Tính khoảng cách Euclidean L2 giữa vector truy vấn (128D) và các mẫu tham chiếu của sinh viên.
+   - Nếu khoảng cách gần nhất $> 0.50$, hệ thống từ chối và xếp vào nhóm **Người lạ (Unknown)**.
+2. **Độ phân biệt Top-1 vs Top-2 (Identity Margin $\ge 0.05$):**
+   - Trường hợp ứng viên Top-1 có $d_1 = 0.41$ và ứng viên Top-2 có $d_2 = 0.42$: Dù cả hai đều $< 0.50$, việc khoảng cách quá sát nhau ($\Delta = 0.01$) chứng tỏ sự mơ hồ danh tính cao.
+   - Hệ thống yêu cầu $\text{Margin} = d_2 - d_1 \ge 0.05$ để khẳng định sự tách bạch rõ ràng giữa hai danh tính.
+
+$$\text{Decision} = \begin{cases} \text{Accept}(ID_1), & \text{nếu } d_1 \le 0.50 \text{ và } (d_2 - d_1) \ge 0.05 \\ \text{Unknown}, & \text{ngược lại} \end{cases}$$
+
+### 2.2. Chiến lược gom mẫu Top-K Mean ($K=2$)
+
+Mỗi sinh viên được đăng ký tối thiểu 5 ảnh ở các góc mặt và điều kiện ánh sáng khác nhau. Khi so khớp:
+- Hệ thống lấy $K=2$ template tham chiếu gần vector truy vấn nhất của sinh viên đó và tính khoảng cách trung bình:
+
+$$d_{\text{rep}} = \frac{1}{K} \sum_{i=1}^{K} d_{(i)}$$
+
+- **Lợi ích kỹ thuật:** Giảm phụ thuộc vào một ảnh chụp bất thường duy nhất (như Min-Distance), đồng thời giữ được độ nhạy với các góc nghiêng tự nhiên tốt hơn so với Centroid đơn lẻ.
+
+### 2.3. Cổng kiểm tra chất lượng ảnh đăng ký (Enrollment Quality Gates)
+
+Khi đăng ký hồ sơ sinh viên:
+- **Single-Face Enforcement:** Bắt buộc mỗi ảnh có chính xác 1 khuôn mặt.
+- **Độ sắc nét (Blur Score):** Biến thiên Laplacian $\ge 40.0$ để loại bỏ ảnh mờ, nhòe do chuyển động.
+- **Độ sáng (Brightness):** Trung bình thang xám từ $40.0$ đến $220.0$ để tránh ngược sáng hoặc cháy sáng.
+- **Kích thước mặt:** Vùng khuôn mặt tối thiểu $100 \times 100\text{ px}$.
+- **Tính nhất quán danh tính (Identity Consistency):** Tính khoảng cách pairwise giữa toàn bộ các ảnh tải lên của sinh viên. Nếu phát hiện khoảng cách giữa hai ảnh bất kỳ $> 0.50$, toàn bộ đợt đăng ký sẽ bị hủy để tránh trộn ảnh nhiều người vào cùng một hồ sơ.
+
+### 2.4. Basic Blink Challenge (Eye Aspect Ratio - EAR)
+
+Nhằm giảm thiểu việc sử dụng ảnh tĩnh để qua mặt camera:
+- Tính tỉ lệ mắt (Eye Aspect Ratio) dựa trên 6 điểm mốc mí mắt:
+
+$$\text{EAR} = \frac{\|p_2 - p_6\| + \|p_3 - p_5\|}{2 \cdot \|p_1 - p_4\|}$$
+
+- **Finite State Machine (FSM):**
+  1. `can_mo` (Mắt mở, $\text{EAR} \ge 0.23$)
+  2. `can_nham` (Mắt nhắm, $\text{EAR} \le 0.19$)
+  3. `can_mo_lai` (Mắt mở lại, $\text{EAR} \ge 0.23$)
+  4. `da_xac_minh` (Hoàn tất xác nhận chớp mắt).
+
+> [!NOTE]
+> *Blink challenge là một heuristic tương tác cơ bản, giúp ngăn chặn gian lận bằng ảnh in tĩnh đơn giản. Hệ thống không tự nhận là giải pháp Face PAD/Anti-spoofing chuyên dụng chống deepfake hoặc video replay.*
+
+### 2.5. Single-Face Gate & Temporal Confirmation
+
+- **Single-Face Gate:** Trong luồng camera realtime, nếu phát hiện 0 hoặc $> 1$ khuôn mặt, hệ thống lập tức đặt trạng thái cảnh báo và reset bộ đếm xác thực. Chỉ khi có duy nhất 1 người trước camera, pipeline nhận diện mới chạy.
+- **Temporal Confirmation:** Yêu cầu danh tính duy nhất phải khớp liên tiếp tối thiểu 3 khung hình và duy trì ổn định ít nhất $500\text{ ms}$ trước khi ghi nhận điểm danh, triệt tiêu hiện tượng giật nhãn (label jittering).
+
+---
+
+## 3. Nghiệp vụ điểm danh (Business Logic)
+
+- **Snapshot danh sách lớp (Session Roster Snapshot):** Khi tạo buổi học, hệ thống tạo bản chụp (snapshot) danh sách sinh viên của môn học tại thời điểm đó vào `session_enrollments`. Điều này đảm bảo lịch sử điểm danh không bị thay đổi nếu danh sách lớp môn học có sự điều chỉnh sau này.
+- **Phân loại Có mặt / Đi trễ:**
+  - $\text{check\_in} \le \text{start\_time} + \text{late\_after\_minutes} \rightarrow \text{Có mặt (Present)}$
+  - $\text{check\_in} > \text{start\_time} + \text{late\_after\_minutes} \rightarrow \text{Đi trễ (Late)}$
+  - Không điểm danh $\rightarrow \text{Vắng (Absent)}$ trong báo cáo.
+- **Chống điểm danh trùng lặp (Duplicate Prevention):** Mỗi sinh viên chỉ có thể điểm danh 1 lần duy nhất trong mỗi buổi học (ràng buộc `UNIQUE(session_id, student_id)` trong SQLite kết hợp khóa mức dịch vụ).
+- **Can thiệp thủ công (Manual Override):** Giảng viên có thể điều chỉnh trạng thái điểm danh cho sinh viên kèm thông tin người duyệt và lý do (ví dụ: camera mờ, xác nhận qua thẻ SV trực tiếp).
+
+---
+
+## 4. Cấu trúc mã nguồn
+
+Kiến trúc được tổ chức gọn gàng, module hóa cao và không bị overengineering:
 
 ```text
 face-attendance-system/
-├── app.py                              # Entry point Streamlit
-├── src/face_attendance/
-│   ├── domain/                         # Entity, enum, exception nghiệp vụ
-│   ├── application/
-│   │   ├── attendance_service.py       # Biometric/manual application flow
-│   │   └── enrollment_service.py       # Consent gate cho enrollment
-│   ├── api.py                          # FastAPI health, policy, session, attendance
-│   ├── config.py                       # .env, path, giới hạn và policy runtime
-│   ├── database.py                     # Schema, migration, transaction, report, audit
-│   ├── liveness.py                     # EAR blink state machine
-│   ├── matcher.py                      # Open-set matcher và Top-2 Mean
-│   ├── policy.py                       # Schema, hash và validation policy
-│   ├── recognition.py                  # Quality gate, enrollment, WebRTC engine
-│   ├── ui.py                           # Dashboard Streamlit/admin
-│   └── utils.py                        # Chuẩn hóa dữ liệu, UTC, PIN
-├── configs/
-│   └── recognition_policy.example.json # Policy chưa calibrated
-├── data/
-│   ├── README.md                       # Data card và quy ước dữ liệu
-│   ├── manifest.example.json           # Manifest private minh họa
-│   ├── private/                        # Dữ liệu thật, tool tạo khi cần và bị ignore
-│   └── results/                        # Kết quả cục bộ, tool tạo khi chạy evaluation
-├── tools/
-│   ├── evaluate_biometrics.py          # Private manifest/leakage gate
-│   ├── evaluate_matching.py            # Matcher sanity/evaluation entry point
-│   ├── matcher_sanity_check.py         # Synthetic matcher sanity check
-│   └── prepare_dataset.py              # Chuẩn bị và kiểm tra dataset
-├── tests/                               # Unit/integration tests
-├── .env.example                         # Cấu hình môi trường mẫu
-├── .github/workflows/ci.yml             # CI lint, format, compile, test
-├── Dockerfile
-├── LICENSE
-└── pyproject.toml                       # Dependency và tool configuration
+├── app.py                      # Điểm chạy chính Streamlit Dashboard
+├── pyproject.toml              # Cấu hình dự án và dependencies
+├── Dockerfile                  # Container hóa triển khai Streamlit
+├── src/
+│   └── face_attendance/
+│       ├── __init__.py         # Package entry & version
+│       ├── config.py           # RecognitionConfig, tham số ngưỡng & môi trường
+│       ├── database.py         # SQLite connection, schema 6 bảng & truy vấn
+│       ├── matcher.py          # Thuật toán Open-Set matching & Top-K Mean
+│       ├── liveness.py         # EAR calculation & BlinkDetector FSM
+│       ├── enrollment.py       # Quality gates, identity consistency & đăng ký mẫu
+│       ├── attendance.py       # Nghiệp vụ điểm danh, roster & manual override
+│       ├── recognition.py      # RecognitionEngine, Single-Face Gate, WebRTC processor
+│       ├── api.py              # FastAPI endpoints (/health, /recognize, /attendance)
+│       ├── ui.py               # Giao diện Streamlit: Điểm danh & Quản trị
+│       └── utils.py            # Tiện ích thời gian VN/UTC, chuẩn hóa chuỗi
+├── tests/
+│   ├── test_matcher.py         # Test ngưỡng khoảng cách, margin, top-k mean
+│   ├── test_liveness.py        # Test EAR & chu trình chớp mắt FSM
+│   ├── test_single_face_gate.py# Test Single-Face Gate & candidate switching
+│   ├── test_enrollment.py      # Test quality gates & identity consistency
+│   ├── test_attendance.py      # Test present/late, duplicate check, manual override
+│   ├── test_database.py        # Test SQLite CRUD & session roster snapshot
+│   ├── test_load_concurrency.py# Test chịu tải & khóa ghi nhận đồng thời
+│   ├── test_image_validation.py# Test giải mã ảnh lỗi, ảnh mờ, tối
+│   ├── test_api.py             # Test FastAPI serving
+│   └── test_config.py          # Test thông số RecognitionConfig
+└── .github/
+    └── workflows/
+        └── ci.yml              # CI workflow: Ruff lint, format & Pytest
 ```
 
-Dependency duy nhất được quản lý trong pyproject.toml; requirements.txt dư thừa đã được loại bỏ để tránh hai nguồn version khác nhau. Cache Python, test, IDE, runtime DB và dữ liệu private bị ignore.
+---
 
-## 6. API
+## 5. Hướng dẫn cài đặt & Chạy ứng dụng
 
-Tất cả endpoint trừ /health cần header X-API-Key. API key được so sánh bằng secrets.compare_digest.
+### 5.1. Yêu cầu hệ thống
 
-| Method | Endpoint | Mục đích |
-|---|---|---|
-| GET | /health | Health check công khai |
-| GET | /policy | Metadata policy đang chạy |
-| GET | /sessions | Danh sách buổi học |
-| GET | /sessions/{session_id}/attendance | Báo cáo attendance theo snapshot |
-| POST | /attendance/biometric | Nhận RecognitionDecision đầy đủ evidence |
-| POST | /attendance/manual | Giảng viên ghi/sửa status, bắt buộc reason |
+- Python $\ge$ 3.11
+- Thư viện C/C++ build tools cho `dlib` (CMake, build-essential/MSVC C++ build tools)
 
-Route /attendance legacy đã được loại bỏ để không tạo đường tắt bỏ qua liveness, temporal evidence và policy gate. Biometric chỉ đi qua /attendance/biometric; manual là luồng human oversight riêng.
-
-Ví dụ payload biometric phải lấy metadata từ GET /policy và gửi đầy đủ:
-
-```json
-{
-  "session_id": 12,
-  "student_id": 34,
-  "student_code": "SV001",
-  "full_name": "Nguyen Van A",
-  "distance": 0.32,
-  "second_distance": 0.55,
-  "margin": 0.23,
-  "liveness_passed": true,
-  "confirmation_frames": 3,
-  "policy_version": "face-policy-v1",
-  "distance_threshold": 0.5,
-  "margin_threshold": 0.05,
-  "aggregation_strategy": "top_k_mean",
-  "embedding_model": "dlib_face_recognition_resnet_v1",
-  "embedding_model_version": "1",
-  "stable_duration_ms": 500,
-  "liveness_policy": "ear_blink_v1",
-  "recognition_policy_hash": "<sha256-64-characters>"
-}
-```
-
-Manual request gồm session_id, student_id, status (present|late|absent), lecturer_id và reason. Database kiểm tra sinh viên thuộc snapshot của session trước khi ghi.
-
-## 7. Cài đặt và chạy
-
-### Windows PowerShell
-
-```powershell
-git clone https://github.com/haminhthong/Face-Attendance-System.git
-cd Face-Attendance-System
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
-Copy-Item .env.example .env
-```
-
-Nếu PowerShell chặn script activate, có thể chạy trực tiếp .\.venv\Scripts\python.exe -m pip install -e ".[dev]".
-
-### Linux/CI
+### 5.2. Cài đặt môi trường
 
 ```bash
-python3.11 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
+# Clone repository
+git clone https://github.com/haminhthong/Face-Attendance-System.git
+cd Face-Attendance-System
+
+# Tạo và kích hoạt virtualenv
+python -m venv .venv
+source .venv/bin/activate  # Trên Windows: .venv\Scripts\activate
+
+# Cài đặt project và dev dependencies
 pip install -e ".[dev]"
 ```
 
-face-recognition/dlib và OpenCV cần native build/runtime. Linux CI cài build-essential, cmake, libopenblas-dev, libgl1, libglib2.0-0; Dockerfile cài cùng nhóm package.
-
-### Cấu hình .env
-
-File .env được nạp tự động nếu python-dotenv có trong môi trường. Tối thiểu khi chạy local:
-
-```dotenv
-APP_ENV=development
-FACE_ATTENDANCE_API_KEY=local-dev-secret
-DATABASE_PATH=face_attendance_data/face_attendance.db
-RECOGNITION_POLICY_PATH=
-BIOMETRIC_RETENTION_DAYS=365
-MAX_UPLOAD_SIZE_MB=8
-PROCESS_EVERY_N_FRAMES=3
-LOG_LEVEL=INFO
-```
-
-DATABASE_PATH được ưu tiên hơn FACE_ATTENDANCE_DATA_DIR. Không commit .env, API key, SQLite DB, ảnh, embedding thật hoặc manifest private.
-
-### Chạy dashboard và API
+### 5.3. Khởi chạy Dashboard Streamlit
 
 ```bash
 streamlit run app.py
+```
+Mở trình duyệt tại `http://localhost:8501`.
+- **Trang Điểm danh:** Chọn buổi học đang mở và cho phép webcam trên trình duyệt.
+- **Trang Quản trị:** Nhập mã PIN (mặc định: `123456`, có thể chỉnh qua biến môi trường `ADMIN_PIN`).
+
+### 5.4. Khởi chạy FastAPI Service
+
+```bash
 uvicorn face_attendance.api:app --reload --port 8000
 ```
+Tài liệu tương tác Swagger UI có sẵn tại `http://localhost:8000/docs`:
+- `GET /health`: Kiểm tra sức khỏe dịch vụ.
+- `POST /recognize`: Nhận diện khuôn mặt từ vector 128D.
+- `GET /sessions/{session_id}/attendance`: Lấy danh sách và báo cáo điểm danh của buổi học.
 
-Dashboard ở http://localhost:8501; Swagger UI ở http://127.0.0.1:8000/docs. Lần chạy đầu tiên, khu vực quản trị yêu cầu tạo PIN 6–12 chữ số.
-
-### Chạy Docker
+### 5.5. Chạy kiểm thử tự động (Unit Tests & Linting)
 
 ```bash
+# Kiểm tra code style với Ruff
+ruff check app.py src tests
+ruff format --check app.py src tests
+
+# Chạy toàn bộ test suite
+pytest -v -p no:cacheprovider
+```
+
+### 5.6. Chạy với Docker
+
+```bash
+# Build Docker image
 docker build -t face-attendance-system .
-docker run --rm -p 8501:8501 \
-  -e APP_ENV=development \
-  -e FACE_ATTENDANCE_API_KEY=local-dev-secret \
-  -v face_attendance_data:/app/face_attendance_data \
-  face-attendance-system
+
+# Khởi chạy container
+docker run -p 8501:8501 face-attendance-system
 ```
 
-## 8. Kiểm thử, CI và đánh giá
+---
 
-`httpx` được khai báo trong dependency chính vì các bài kiểm thử API dùng `FastAPI TestClient`; do đó cả `pip install -e .` và `pip install -e ".[dev]"` đều có đủ dependency này.
+## 6. Chính sách bảo mật & Dữ liệu cá nhân
 
-Các lệnh CI chính:
-
-```bash
-python -m compileall -q app.py src tests
-ruff check app.py src tools tests
-ruff format --check app.py src tools tests
-pytest -q -p no:cacheprovider
-```
-
-GitHub Actions dùng Python 3.11, cài native dependencies trước khi cài .[dev], đặt permissions: contents: read, timeout 20 phút và hủy run cũ cùng branch. Test ảnh/WebRTC được chạy trong CI đầy đủ dependency; local thiếu OpenCV sẽ không đại diện cho CI.
-
-Chạy local:
-
-```bash
-python -m ruff check app.py src tools tests
-python -m ruff format --check app.py src tools tests
-python -m pytest -q -p no:cacheprovider
-```
-
-Các tool evaluation tách khỏi claim production:
-
-```bash
-python tools/prepare_dataset.py
-python tools/matcher_sanity_check.py
-python tools/evaluate_matching.py
-python tools/evaluate_biometrics.py --manifest data/private/manifest.json
-```
-
-Matcher sanity dùng vector synthetic để kiểm tra toán Top-K/centroid/min-distance, margin, reject và latency; kết quả không deployable. evaluate_biometrics.py không fallback sang synthetic, chỉ gate manifest/split/leakage và không tự chọn threshold. Validation dùng để chọn policy; test chỉ chạy sau khi policy khóa.
-
-## 9. Repo cleanliness và giới hạn triển khai
-
-- Chỉ còn hai file Markdown có mục đích: README này và data/README.md.
-- Không chứa file hướng dẫn cũ, report build hoặc requirements trùng với pyproject.
-- data/private và data/results không chứa artifact runtime trong repo; tool tự tạo khi cần.
-- CI kiểm tra format để ngăn whitespace và import drift quay lại.
-- Audit log không thay thế phân quyền; cần đặt SQLite trên volume bền vững, giới hạn filesystem permission và backup có kiểm soát.
-- Cần private validation/test set, đánh giá theo identity/capture session và review pháp lý trước khi gọi là production.
-
-## 10. License
-
-MIT License. Xem LICENSE.
+- **Không lưu trữ ảnh gốc:** Hệ thống chỉ giải mã ảnh trong RAM, trích xuất vector đặc trưng 128D và lưu BLOB vector vào SQLite; file ảnh gốc bị hủy ngay sau khi xử lý.
+- **Biometric Consent:** Bắt buộc có sự đồng ý của sinh viên trước khi trích xuất hoặc lưu trữ vector khuôn mặt.
+- **Quyền thu hồi dữ liệu:** Quản trị viên có chức năng thu hồi/xóa toàn bộ vector khuôn mặt của sinh viên bất cứ lúc nào, trong khi lịch sử điểm danh học vụ vẫn được bảo lưu.

@@ -9,7 +9,7 @@ import streamlit as st
 from face_attendance.config import (
     APP_TITLE,
     CONFIRMATION_FRAMES,
-    FACE_TOLERANCE,
+    FACE_DISTANCE_THRESHOLD,
     PROCESS_EVERY_N_FRAMES,
 )
 from face_attendance.database import init_database
@@ -27,7 +27,7 @@ def main() -> None:
     page = st.sidebar.radio("Chức năng", ["Điểm danh", "Quản trị"])
     st.sidebar.divider()
     st.sidebar.caption(
-        f"Ngưỡng nhận diện: {FACE_TOLERANCE:.2f} · "
+        f"Ngưỡng nhận diện: {FACE_DISTANCE_THRESHOLD:.2f} · "
         f"Xác nhận: {CONFIRMATION_FRAMES} khung hình · "
         f"Xử lý mỗi {PROCESS_EVERY_N_FRAMES} khung hình"
     )

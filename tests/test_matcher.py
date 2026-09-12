@@ -82,3 +82,19 @@ def test_matcher_single_identity_serializes_finite_margin() -> None:
     assert result.mau is not None
     assert np.isfinite(result.khoang_cach_thu_hai)
     assert result.do_phan_biet == 0.05
+
+
+def test_top_k_mean_averages_closest_k_samples() -> None:
+    query = np.zeros(128)
+    # Student 1 có 3 samples với khoảng cách 0.2, 0.4, 0.8
+    v1 = np.full(128, np.sqrt(0.04 / 128))  # dist = 0.2
+    v2 = np.full(128, np.sqrt(0.16 / 128))  # dist = 0.4
+    v3 = np.full(128, np.sqrt(0.64 / 128))  # dist = 0.8
+    samples = [Mau(1, v3), Mau(1, v1), Mau(1, v2)]
+
+    res = tim_danh_tinh_tot_nhat(
+        query, samples, distance_threshold=0.5, identity_margin=0.0, top_k=2
+    )
+    # Top 2 samples gần nhất là v1 (0.2) và v2 (0.4) -> trung bình = 0.3
+    assert res.mau is not None
+    assert pytest.approx(res.distance, abs=1e-4) == 0.30
