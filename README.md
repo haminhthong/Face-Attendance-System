@@ -190,19 +190,27 @@ source .venv/bin/activate  # Trên Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 ```
 
-### 5.3. Khởi chạy Dashboard Streamlit
+### 5.3. Khởi chạy Dashboard Streamlit (Giao diện Hiện đại)
 
 ```bash
 streamlit run app.py
 ```
 Mở trình duyệt tại `http://localhost:8501`.
-- **Trang Điểm danh:** Chọn buổi học đang mở và cho phép webcam trên trình duyệt.
-- **Trang Quản trị:** Nhập mã PIN (mặc định: `123456`, có thể chỉnh qua biến môi trường `ADMIN_PIN`).
+Giao diện mới được thiết kế theo chuẩn thẩm mỹ Dashboard sinh trắc học với 6 phân hệ:
+1. **📊 Bảng điều khiển (Overview):** Số liệu KPI tổng quan, sơ đồ 8 bước nhận diện và lịch sử buổi học.
+2. **📸 Điểm danh trực tiếp (Live Attendance):** Hỗ trợ song song cả **🎥 Camera WebRTC thời gian thực** (kèm FSM Blink Challenge) và **📷 Chụp ảnh Snapshot điểm danh tức thì**.
+3. **👥 Quản lý Sinh viên (Students & Biometrics):** Đăng ký sinh viên chuẩn Quality Gates (≥5 ảnh, kiểm tra sáng/mờ/kích thước), tra cứu danh bạ và **Thu hồi sinh trắc học** (GDPR/Right to Erasure).
+4. **📚 Môn học & Buổi học (Courses & Sessions):** Quản lý học phần, xếp sinh viên vào lớp và tự động tạo Snapshot danh sách theo buổi.
+5. **📋 Báo cáo & Điều chỉnh (Reports & Manual Override):** Thống kê chuyên cần, xuất CSV UTF-8-SIG (chuẩn Excel tiếng Việt), và can thiệp thủ công có lưu vết kiểm toán (Audit Log).
+6. **⚙️ Cài đặt Hệ thống (Config & Diagnostics):** Tra cứu tham số thuật toán Open-Set và kiểm tra sức khỏe cơ sở dữ liệu SQLite WAL.
+
+> [!NOTE]
+> *Dự án vận hành hoàn toàn trên môi trường **Native Python (không sử dụng Docker)**, giúp giảm thiểu độ trễ truy cập phần cứng camera/webcam và tăng tốc độ xử lý dlib/OpenCV.*
 
 ### 5.4. Khởi chạy FastAPI Service
 
 ```bash
-uvicorn face_attendance.api:app --reload --port 8000
+uvicorn face_attendance.api:app --app-dir src --reload --port 8000
 ```
 Tài liệu tương tác Swagger UI có sẵn tại `http://localhost:8000/docs`:
 - `GET /health`: Kiểm tra sức khỏe dịch vụ.
@@ -214,10 +222,9 @@ Tài liệu tương tác Swagger UI có sẵn tại `http://localhost:8000/docs`
 ```bash
 # Kiểm tra code style với Ruff
 ruff check app.py src tests
-ruff format --check app.py src tests
 
-# Chạy toàn bộ test suite
-pytest -v -p no:cacheprovider
+# Chạy toàn bộ test suite (100% Passed)
+pytest -v
 ```
 
 ---

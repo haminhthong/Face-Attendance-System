@@ -6,7 +6,7 @@ from face_attendance import config, database
 from face_attendance.utils import utc_now
 
 
-def tao_du_lieu_buoi_hoc(tmp_path, monkeypatch) -> tuple[int, int]:
+def setup_session_data(tmp_path, monkeypatch) -> tuple[int, int]:
     """Tạo dữ liệu tối thiểu cho các test nghiệp vụ điểm danh."""
     test_db = tmp_path / "test.db"
     monkeypatch.setattr(config, "DB_PATH", test_db)
@@ -32,7 +32,7 @@ def tao_du_lieu_buoi_hoc(tmp_path, monkeypatch) -> tuple[int, int]:
 
 
 def test_attendance_is_created_once(tmp_path, monkeypatch) -> None:
-    student_id, session_id = tao_du_lieu_buoi_hoc(tmp_path, monkeypatch)
+    student_id, session_id = setup_session_data(tmp_path, monkeypatch)
     database.change_session_status(session_id, "open")
 
     result, _ = database.mark_attendance(session_id, student_id, 0.4)
@@ -43,7 +43,7 @@ def test_attendance_is_created_once(tmp_path, monkeypatch) -> None:
 
 
 def test_session_roster_is_a_snapshot(tmp_path, monkeypatch) -> None:
-    _, session_id = tao_du_lieu_buoi_hoc(tmp_path, monkeypatch)
+    _, session_id = setup_session_data(tmp_path, monkeypatch)
     course_id = int(database.list_courses()[0]["id"])
     database.set_course_roster(course_id, [])
 

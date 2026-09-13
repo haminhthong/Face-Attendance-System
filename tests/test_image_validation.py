@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from face_attendance.config import MAX_UPLOAD_BYTES
-from face_attendance.recognition import decode_and_validate_face
+from face_attendance.enrollment import decode_and_validate_face
 
 
 def test_decode_empty_bytes() -> None:
